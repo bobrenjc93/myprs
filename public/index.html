@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My PRs</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      padding: 24px;
+      max-width: 960px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    h1 {
+      font-size: 24px;
+      font-weight: 600;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .toggle-btn {
+      background: #21262d;
+      border: 1px solid #30363d;
+      color: #e6edf3;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: background 0.15s;
+    }
+
+    .toggle-btn:hover { background: #30363d; }
+    .toggle-btn.active { background: #1f6feb; border-color: #1f6feb; }
+
+    .sort-btn {
+      background: #21262d;
+      border: 1px solid #30363d;
+      color: #e6edf3;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: background 0.15s;
+    }
+
+    .sort-btn:hover { background: #30363d; }
+
+    .stats {
+      font-size: 13px;
+      color: #8b949e;
+    }
+
+    .repo-group {
+      margin-bottom: 20px;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .repo-header {
+      background: #161b22;
+      padding: 12px 16px;
+      font-weight: 600;
+      font-size: 15px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .repo-header:hover { background: #1c2128; }
+
+    .repo-header a {
+      color: #58a6ff;
+      text-decoration: none;
+    }
+
+    .repo-header a:hover { text-decoration: underline; }
+
+    .repo-count {
+      background: #30363d;
+      color: #8b949e;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .pr-list { list-style: none; }
+
+    .pr-item {
+      padding: 10px 16px;
+      border-top: 1px solid #21262d;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .pr-item:hover { background: #161b22; }
+
+    .pr-icon {
+      flex-shrink: 0;
+      width: 18px;
+      height: 18px;
+      margin-top: 2px;
+    }
+
+    .pr-icon.open { color: #3fb950; }
+    .pr-icon.draft { color: #8b949e; }
+
+    .pr-body { flex: 1; min-width: 0; }
+
+    .pr-title-row {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .pr-title {
+      color: #e6edf3;
+      text-decoration: none;
+      font-weight: 500;
+      font-size: 14px;
+    }
+
+    .pr-title:hover { color: #58a6ff; text-decoration: underline; }
+
+    .pr-number {
+      color: #8b949e;
+      font-size: 13px;
+    }
+
+    .draft-badge {
+      background: #30363d;
+      color: #8b949e;
+      padding: 1px 6px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .label {
+      padding: 1px 6px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 500;
+      border: 1px solid transparent;
+    }
+
+    .pr-meta {
+      font-size: 12px;
+      color: #8b949e;
+      margin-top: 3px;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 60px 20px;
+      color: #8b949e;
+      font-size: 15px;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 2px solid #30363d;
+      border-top-color: #58a6ff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      margin-bottom: 12px;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .error {
+      text-align: center;
+      padding: 40px;
+      color: #f85149;
+    }
+
+    .collapsed .pr-list { display: none; }
+    .collapsed .collapse-icon { transform: rotate(-90deg); }
+
+    .collapse-icon {
+      transition: transform 0.15s;
+      color: #8b949e;
+      font-size: 12px;
+    }
+
+    .repo-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>My Pull Requests</h1>
+    <div class="controls">
+      <span class="stats" id="stats"></span>
+      <button class="sort-btn" id="sortBtn" title="Toggle sort order">Oldest first</button>
+      <button class="toggle-btn active" id="draftToggle">Drafts</button>
+      <button class="toggle-btn" id="refreshBtn">Refresh</button>
+    </div>
+  </header>
+  <main id="app">
+    <div class="loading">
+      <div class="spinner"></div>
+      <div>Fetching PRs...</div>
+    </div>
+  </main>
+
+  <script>
+    let allPRs = [];
+    let showDrafts = true;
+    let oldestFirst = true;
+
+    const app = document.getElementById("app");
+    const draftToggle = document.getElementById("draftToggle");
+    const sortBtn = document.getElementById("sortBtn");
+    const refreshBtn = document.getElementById("refreshBtn");
+    const stats = document.getElementById("stats");
+
+    async function fetchPRs() {
+      app.innerHTML = '<div class="loading"><div class="spinner"></div><div>Fetching PRs...</div></div>';
+      try {
+        const res = await fetch("/api/prs");
+        if (!res.ok) throw new Error("Failed to fetch");
+        allPRs = await res.json();
+        render();
+      } catch (e) {
+        app.innerHTML = '<div class="error">Failed to load PRs. Is gh authenticated?</div>';
+      }
+    }
+
+    function timeAgo(dateStr) {
+      const seconds = Math.floor((Date.now() - new Date(dateStr)) / 1000);
+      if (seconds < 60) return "just now";
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours}h ago`;
+      const days = Math.floor(hours / 24);
+      if (days < 30) return `${days}d ago`;
+      const months = Math.floor(days / 30);
+      return `${months}mo ago`;
+    }
+
+    function getLabelStyle(label) {
+      const hex = label.color;
+      const r = parseInt(hex.slice(0, 2), 16);
+      const g = parseInt(hex.slice(2, 4), 16);
+      const b = parseInt(hex.slice(4, 6), 16);
+      return `background: rgba(${r},${g},${b},0.2); color: #${hex}; border-color: rgba(${r},${g},${b},0.4);`;
+    }
+
+    function prIcon(isDraft) {
+      if (isDraft) {
+        return `<svg class="pr-icon draft" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M3.5 9.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/>
+          <path fill-rule="evenodd" d="M3.5 1a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0v-5.5A.75.75 0 0 1 3.5 1zm9 0a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0v-5.5A.75.75 0 0 1 12.5 1z"/>
+        </svg>`;
+      }
+      return `<svg class="pr-icon open" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M7.177 3.073L9.573.677A.25.25 0 0 1 10 .854v4.792a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354zM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5zm-2.25.75a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25zM11 2.5h-1V4h1a1 1 0 0 1 1 1v5.628a2.251 2.251 0 1 0 1.5 0V5A2.5 2.5 0 0 0 11 2.5zm1 10.25a.75.75 0 1 1 1.5 0 .75.75 0 0 1-1.5 0zM3.75 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5z"/>
+      </svg>`;
+    }
+
+    function render() {
+      const filtered = showDrafts ? allPRs : allPRs.filter(pr => !pr.isDraft);
+
+      const sorted = [...filtered].sort((a, b) => {
+        const da = new Date(a.updatedAt);
+        const db = new Date(b.updatedAt);
+        return oldestFirst ? da - db : db - da;
+      });
+
+      // Group by repo
+      const groups = new Map();
+      for (const pr of sorted) {
+        const repo = pr.repository.nameWithOwner;
+        if (!groups.has(repo)) groups.set(repo, []);
+        groups.get(repo).push(pr);
+      }
+
+      // Sort repo groups by their oldest/newest PR (matching current sort)
+      const sortedGroups = [...groups.entries()].sort((a, b) => {
+        const aDate = new Date(a[1][0].updatedAt);
+        const bDate = new Date(b[1][0].updatedAt);
+        return oldestFirst ? aDate - bDate : bDate - aDate;
+      });
+
+      const draftCount = allPRs.filter(pr => pr.isDraft).length;
+      const nonDraftCount = allPRs.length - draftCount;
+      stats.textContent = `${filtered.length} PRs (${nonDraftCount} active, ${draftCount} draft)`;
+
+      if (sorted.length === 0) {
+        app.innerHTML = '<div class="loading">No PRs found.</div>';
+        return;
+      }
+
+      app.innerHTML = sortedGroups.map(([repo, prs]) => `
+        <div class="repo-group" data-repo="${repo}">
+          <div class="repo-header" onclick="toggleGroup(this)">
+            <div class="repo-left">
+              <span class="collapse-icon">&#9660;</span>
+              <a href="https://github.com/${repo}" target="_blank" onclick="event.stopPropagation()">${repo}</a>
+            </div>
+            <span class="repo-count">${prs.length}</span>
+          </div>
+          <ul class="pr-list">
+            ${prs.map(pr => `
+              <li class="pr-item">
+                ${prIcon(pr.isDraft)}
+                <div class="pr-body">
+                  <div class="pr-title-row">
+                    <a class="pr-title" href="${pr.url}" target="_blank">${escapeHtml(pr.title)}</a>
+                    <span class="pr-number">#${pr.number}</span>
+                    ${pr.isDraft ? '<span class="draft-badge">Draft</span>' : ''}
+                    ${pr.labels.map(l => `<span class="label" style="${getLabelStyle(l)}">${escapeHtml(l.name)}</span>`).join('')}
+                  </div>
+                  <div class="pr-meta">
+                    Updated ${timeAgo(pr.updatedAt)} &middot; Created ${timeAgo(pr.createdAt)}
+                  </div>
+                </div>
+              </li>
+            `).join('')}
+          </ul>
+        </div>
+      `).join('');
+    }
+
+    function escapeHtml(text) {
+      const d = document.createElement("div");
+      d.textContent = text;
+      return d.innerHTML;
+    }
+
+    function toggleGroup(header) {
+      header.parentElement.classList.toggle("collapsed");
+    }
+
+    draftToggle.addEventListener("click", () => {
+      showDrafts = !showDrafts;
+      draftToggle.classList.toggle("active", showDrafts);
+      render();
+    });
+
+    sortBtn.addEventListener("click", () => {
+      oldestFirst = !oldestFirst;
+      sortBtn.textContent = oldestFirst ? "Oldest first" : "Newest first";
+      render();
+    });
+
+    refreshBtn.addEventListener("click", fetchPRs);
+
+    fetchPRs();
+  </script>
+</body>
+</html>
