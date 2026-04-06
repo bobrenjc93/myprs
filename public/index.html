@@ -12,6 +12,7 @@
       background: #0d1117;
       color: #e6edf3;
       padding: 24px;
+      padding-bottom: 80px;
       max-width: 960px;
       margin: 0 auto;
     }
@@ -25,18 +26,16 @@
       gap: 12px;
     }
 
-    h1 {
-      font-size: 24px;
-      font-weight: 600;
-    }
+    h1 { font-size: 24px; font-weight: 600; }
 
     .controls {
       display: flex;
       align-items: center;
-      gap: 16px;
+      gap: 12px;
+      flex-wrap: wrap;
     }
 
-    .toggle-btn {
+    .btn {
       background: #21262d;
       border: 1px solid #30363d;
       color: #e6edf3;
@@ -47,26 +46,10 @@
       transition: background 0.15s;
     }
 
-    .toggle-btn:hover { background: #30363d; }
-    .toggle-btn.active { background: #1f6feb; border-color: #1f6feb; }
+    .btn:hover { background: #30363d; }
+    .btn.active { background: #1f6feb; border-color: #1f6feb; }
 
-    .sort-btn {
-      background: #21262d;
-      border: 1px solid #30363d;
-      color: #e6edf3;
-      padding: 6px 14px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 13px;
-      transition: background 0.15s;
-    }
-
-    .sort-btn:hover { background: #30363d; }
-
-    .stats {
-      font-size: 13px;
-      color: #8b949e;
-    }
+    .stats { font-size: 13px; color: #8b949e; }
 
     .repo-group {
       margin-bottom: 20px;
@@ -89,11 +72,7 @@
 
     .repo-header:hover { background: #1c2128; }
 
-    .repo-header a {
-      color: #58a6ff;
-      text-decoration: none;
-    }
-
+    .repo-header a { color: #58a6ff; text-decoration: none; }
     .repo-header a:hover { text-decoration: underline; }
 
     .repo-count {
@@ -113,9 +92,20 @@
       display: flex;
       align-items: flex-start;
       gap: 10px;
+      cursor: default;
     }
 
     .pr-item:hover { background: #161b22; }
+    .pr-item.selected { background: #1a2332; }
+
+    .pr-checkbox {
+      flex-shrink: 0;
+      width: 16px;
+      height: 16px;
+      margin-top: 3px;
+      accent-color: #1f6feb;
+      cursor: pointer;
+    }
 
     .pr-icon {
       flex-shrink: 0;
@@ -145,14 +135,20 @@
 
     .pr-title:hover { color: #58a6ff; text-decoration: underline; }
 
-    .pr-number {
-      color: #8b949e;
-      font-size: 13px;
-    }
+    .pr-number { color: #8b949e; font-size: 13px; }
 
     .draft-badge {
       background: #30363d;
       color: #8b949e;
+      padding: 1px 6px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .sleep-badge {
+      background: rgba(210, 153, 34, 0.2);
+      color: #d29922;
       padding: 1px 6px;
       border-radius: 10px;
       font-size: 11px;
@@ -172,6 +168,19 @@
       color: #8b949e;
       margin-top: 3px;
     }
+
+    .wake-btn {
+      background: none;
+      border: 1px solid #30363d;
+      color: #8b949e;
+      padding: 2px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      margin-left: 8px;
+    }
+
+    .wake-btn:hover { background: #21262d; color: #e6edf3; }
 
     .loading {
       text-align: center;
@@ -193,11 +202,7 @@
 
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    .error {
-      text-align: center;
-      padding: 40px;
-      color: #f85149;
-    }
+    .error { text-align: center; padding: 40px; color: #f85149; }
 
     .collapsed .pr-list { display: none; }
     .collapsed .collapse-icon { transform: rotate(-90deg); }
@@ -213,6 +218,67 @@
       align-items: center;
       gap: 8px;
     }
+
+    /* Selection action bar */
+    .action-bar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: #161b22;
+      border-top: 1px solid #30363d;
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      z-index: 100;
+      transform: translateY(100%);
+      transition: transform 0.2s ease;
+    }
+
+    .action-bar.visible { transform: translateY(0); }
+
+    .action-bar .count {
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .action-bar .sleep-btn {
+      background: #d29922;
+      border: none;
+      color: #0d1117;
+      padding: 8px 18px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .action-bar .sleep-btn:hover { background: #e3b341; }
+
+    .action-bar .clear-btn {
+      background: none;
+      border: 1px solid #30363d;
+      color: #8b949e;
+      padding: 8px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    .action-bar .clear-btn:hover { background: #21262d; color: #e6edf3; }
+
+    .section-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: #8b949e;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin: 28px 0 12px;
+    }
+
+    .pr-item.sleeping { opacity: 0.6; }
   </style>
 </head>
 <body>
@@ -220,9 +286,10 @@
     <h1>My Pull Requests</h1>
     <div class="controls">
       <span class="stats" id="stats"></span>
-      <button class="sort-btn" id="sortBtn" title="Toggle sort order">Oldest first</button>
-      <button class="toggle-btn active" id="draftToggle">Drafts</button>
-      <button class="toggle-btn" id="refreshBtn">Refresh</button>
+      <button class="btn" id="sortBtn" title="Toggle sort order">Oldest first</button>
+      <button class="btn active" id="draftToggle">Drafts</button>
+      <button class="btn" id="sleepToggle">Sleeping</button>
+      <button class="btn" id="refreshBtn">Refresh</button>
     </div>
   </header>
   <main id="app">
@@ -231,28 +298,86 @@
       <div>Fetching PRs...</div>
     </div>
   </main>
+  <div class="action-bar" id="actionBar">
+    <span class="count" id="selCount"></span>
+    <button class="sleep-btn" id="sleepSelectedBtn">Sleep 1 week</button>
+    <button class="clear-btn" id="clearSelBtn">Clear</button>
+  </div>
 
   <script>
     let allPRs = [];
+    let sleepData = {};
     let showDrafts = true;
+    let showSleeping = false;
     let oldestFirst = true;
+    let selected = new Set();    // set of PR keys
+    let lastClickedKey = null;   // for shift-click
+    let renderedKeys = [];       // flat ordered list of visible PR keys for shift-select
 
     const app = document.getElementById("app");
     const draftToggle = document.getElementById("draftToggle");
+    const sleepToggle = document.getElementById("sleepToggle");
     const sortBtn = document.getElementById("sortBtn");
     const refreshBtn = document.getElementById("refreshBtn");
     const stats = document.getElementById("stats");
+    const actionBar = document.getElementById("actionBar");
+    const selCount = document.getElementById("selCount");
+    const sleepSelectedBtn = document.getElementById("sleepSelectedBtn");
+    const clearSelBtn = document.getElementById("clearSelBtn");
+
+    function prKey(pr) {
+      return `${pr.repository.nameWithOwner}#${pr.number}`;
+    }
+
+    function isSleeping(pr) {
+      const entry = sleepData[prKey(pr)];
+      if (!entry) return false;
+      return new Date(entry.until).getTime() > Date.now();
+    }
+
+    function sleepRemaining(pr) {
+      const entry = sleepData[prKey(pr)];
+      if (!entry) return "";
+      const ms = new Date(entry.until).getTime() - Date.now();
+      if (ms <= 0) return "";
+      const days = Math.ceil(ms / (24 * 60 * 60 * 1000));
+      return `${days}d left`;
+    }
 
     async function fetchPRs() {
       app.innerHTML = '<div class="loading"><div class="spinner"></div><div>Fetching PRs...</div></div>';
       try {
-        const res = await fetch("/api/prs");
-        if (!res.ok) throw new Error("Failed to fetch");
-        allPRs = await res.json();
+        const [prRes, sleepRes] = await Promise.all([
+          fetch("/api/prs"),
+          fetch("/api/sleep"),
+        ]);
+        if (!prRes.ok) throw new Error("Failed to fetch PRs");
+        allPRs = await prRes.json();
+        sleepData = await sleepRes.json();
+        selected.clear();
+        updateActionBar();
         render();
       } catch (e) {
         app.innerHTML = '<div class="error">Failed to load PRs. Is gh authenticated?</div>';
       }
+    }
+
+    async function sleepPRs(keys, days) {
+      const res = await fetch("/api/sleep", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keys, days }),
+      });
+      sleepData = await res.json();
+      selected.clear();
+      updateActionBar();
+      render();
+    }
+
+    async function wakePR(key) {
+      const res = await fetch(`/api/sleep/${encodeURIComponent(key)}`, { method: "DELETE" });
+      sleepData = await res.json();
+      render();
     }
 
     function timeAgo(dateStr) {
@@ -288,8 +413,109 @@
       </svg>`;
     }
 
+    function escapeHtml(text) {
+      const d = document.createElement("div");
+      d.textContent = text;
+      return d.innerHTML;
+    }
+
+    function updateActionBar() {
+      const n = selected.size;
+      actionBar.classList.toggle("visible", n > 0);
+      selCount.textContent = `${n} PR${n === 1 ? '' : 's'} selected`;
+    }
+
+    function handleCheckboxClick(key, e) {
+      e.stopPropagation();
+
+      if (e.shiftKey && lastClickedKey && lastClickedKey !== key) {
+        // Shift-click: select range
+        const startIdx = renderedKeys.indexOf(lastClickedKey);
+        const endIdx = renderedKeys.indexOf(key);
+        if (startIdx !== -1 && endIdx !== -1) {
+          const lo = Math.min(startIdx, endIdx);
+          const hi = Math.max(startIdx, endIdx);
+          for (let i = lo; i <= hi; i++) {
+            selected.add(renderedKeys[i]);
+          }
+        }
+      } else {
+        if (selected.has(key)) {
+          selected.delete(key);
+        } else {
+          selected.add(key);
+        }
+      }
+
+      lastClickedKey = key;
+      updateActionBar();
+      updateCheckboxes();
+    }
+
+    function handleRowClick(key, e) {
+      // Don't toggle selection when clicking links
+      if (e.target.closest('a') || e.target.closest('.wake-btn')) return;
+      // Treat row click like checkbox click for selection
+      handleCheckboxClick(key, e);
+    }
+
+    function updateCheckboxes() {
+      document.querySelectorAll('.pr-item[data-key]').forEach(el => {
+        const key = el.dataset.key;
+        const cb = el.querySelector('.pr-checkbox');
+        const isSelected = selected.has(key);
+        if (cb) cb.checked = isSelected;
+        el.classList.toggle('selected', isSelected);
+      });
+    }
+
+    function renderGroup(repo, prs, isSleepSection) {
+      return `
+        <div class="repo-group" data-repo="${repo}">
+          <div class="repo-header" onclick="toggleGroup(this)">
+            <div class="repo-left">
+              <span class="collapse-icon">&#9660;</span>
+              <a href="https://github.com/${repo}" target="_blank" onclick="event.stopPropagation()">${repo}</a>
+            </div>
+            <span class="repo-count">${prs.length}</span>
+          </div>
+          <ul class="pr-list">
+            ${prs.map(pr => {
+              const key = prKey(pr);
+              const sleeping = isSleeping(pr);
+              return `
+              <li class="pr-item ${selected.has(key) ? 'selected' : ''} ${sleeping ? 'sleeping' : ''}"
+                  data-key="${key}" onclick="handleRowClick('${key}', event)">
+                <input type="checkbox" class="pr-checkbox"
+                  ${selected.has(key) ? 'checked' : ''}
+                  onclick="handleCheckboxClick('${key}', event)">
+                ${prIcon(pr.isDraft)}
+                <div class="pr-body">
+                  <div class="pr-title-row">
+                    <a class="pr-title" href="${pr.url}" target="_blank">${escapeHtml(pr.title)}</a>
+                    <span class="pr-number">#${pr.number}</span>
+                    ${pr.isDraft ? '<span class="draft-badge">Draft</span>' : ''}
+                    ${sleeping ? `<span class="sleep-badge">Sleeping ${sleepRemaining(pr)}</span>` : ''}
+                    ${isSleepSection ? `<button class="wake-btn" onclick="event.stopPropagation(); wakePR('${key}')">Wake</button>` : ''}
+                    ${pr.labels.map(l => `<span class="label" style="${getLabelStyle(l)}">${escapeHtml(l.name)}</span>`).join('')}
+                  </div>
+                  <div class="pr-meta">
+                    Updated ${timeAgo(pr.updatedAt)} &middot; Created ${timeAgo(pr.createdAt)}
+                  </div>
+                </div>
+              </li>`;
+            }).join('')}
+          </ul>
+        </div>`;
+    }
+
     function render() {
-      const filtered = showDrafts ? allPRs : allPRs.filter(pr => !pr.isDraft);
+      // Separate awake vs sleeping
+      const awakePRs = allPRs.filter(pr => !isSleeping(pr));
+      const sleepingPRs = allPRs.filter(pr => isSleeping(pr));
+
+      // Filter drafts in awake list
+      const filtered = showDrafts ? awakePRs : awakePRs.filter(pr => !pr.isDraft);
 
       const sorted = [...filtered].sort((a, b) => {
         const da = new Date(a.updatedAt);
@@ -305,57 +531,53 @@
         groups.get(repo).push(pr);
       }
 
-      // Sort repo groups by their oldest/newest PR (matching current sort)
       const sortedGroups = [...groups.entries()].sort((a, b) => {
         const aDate = new Date(a[1][0].updatedAt);
         const bDate = new Date(b[1][0].updatedAt);
         return oldestFirst ? aDate - bDate : bDate - aDate;
       });
 
-      const draftCount = allPRs.filter(pr => pr.isDraft).length;
-      const nonDraftCount = allPRs.length - draftCount;
-      stats.textContent = `${filtered.length} PRs (${nonDraftCount} active, ${draftCount} draft)`;
-
-      if (sorted.length === 0) {
-        app.innerHTML = '<div class="loading">No PRs found.</div>';
-        return;
+      // Build flat key list for shift-select
+      renderedKeys = [];
+      for (const [, prs] of sortedGroups) {
+        for (const pr of prs) renderedKeys.push(prKey(pr));
       }
 
-      app.innerHTML = sortedGroups.map(([repo, prs]) => `
-        <div class="repo-group" data-repo="${repo}">
-          <div class="repo-header" onclick="toggleGroup(this)">
-            <div class="repo-left">
-              <span class="collapse-icon">&#9660;</span>
-              <a href="https://github.com/${repo}" target="_blank" onclick="event.stopPropagation()">${repo}</a>
-            </div>
-            <span class="repo-count">${prs.length}</span>
-          </div>
-          <ul class="pr-list">
-            ${prs.map(pr => `
-              <li class="pr-item">
-                ${prIcon(pr.isDraft)}
-                <div class="pr-body">
-                  <div class="pr-title-row">
-                    <a class="pr-title" href="${pr.url}" target="_blank">${escapeHtml(pr.title)}</a>
-                    <span class="pr-number">#${pr.number}</span>
-                    ${pr.isDraft ? '<span class="draft-badge">Draft</span>' : ''}
-                    ${pr.labels.map(l => `<span class="label" style="${getLabelStyle(l)}">${escapeHtml(l.name)}</span>`).join('')}
-                  </div>
-                  <div class="pr-meta">
-                    Updated ${timeAgo(pr.updatedAt)} &middot; Created ${timeAgo(pr.createdAt)}
-                  </div>
-                </div>
-              </li>
-            `).join('')}
-          </ul>
-        </div>
-      `).join('');
-    }
+      // Sleeping group
+      const sleepGroups = new Map();
+      for (const pr of sleepingPRs) {
+        const repo = pr.repository.nameWithOwner;
+        if (!sleepGroups.has(repo)) sleepGroups.set(repo, []);
+        sleepGroups.get(repo).push(pr);
+      }
 
-    function escapeHtml(text) {
-      const d = document.createElement("div");
-      d.textContent = text;
-      return d.innerHTML;
+      if (showSleeping) {
+        for (const [, prs] of sleepGroups) {
+          for (const pr of prs) renderedKeys.push(prKey(pr));
+        }
+      }
+
+      // Stats
+      const draftCount = awakePRs.filter(pr => pr.isDraft).length;
+      const nonDraftCount = awakePRs.length - draftCount;
+      stats.textContent = `${filtered.length} PRs (${nonDraftCount} active, ${draftCount} draft, ${sleepingPRs.length} sleeping)`;
+
+      let html = '';
+
+      if (sorted.length === 0 && (!showSleeping || sleepingPRs.length === 0)) {
+        html = '<div class="loading">No PRs found.</div>';
+      } else {
+        html = sortedGroups.map(([repo, prs]) => renderGroup(repo, prs, false)).join('');
+      }
+
+      if (showSleeping && sleepingPRs.length > 0) {
+        html += '<div class="section-label">Sleeping</div>';
+        html += [...sleepGroups.entries()]
+          .map(([repo, prs]) => renderGroup(repo, prs, true))
+          .join('');
+      }
+
+      app.innerHTML = html;
     }
 
     function toggleGroup(header) {
@@ -368,6 +590,12 @@
       render();
     });
 
+    sleepToggle.addEventListener("click", () => {
+      showSleeping = !showSleeping;
+      sleepToggle.classList.toggle("active", showSleeping);
+      render();
+    });
+
     sortBtn.addEventListener("click", () => {
       oldestFirst = !oldestFirst;
       sortBtn.textContent = oldestFirst ? "Oldest first" : "Newest first";
@@ -375,6 +603,17 @@
     });
 
     refreshBtn.addEventListener("click", fetchPRs);
+
+    sleepSelectedBtn.addEventListener("click", () => {
+      if (selected.size === 0) return;
+      sleepPRs([...selected], 7);
+    });
+
+    clearSelBtn.addEventListener("click", () => {
+      selected.clear();
+      updateActionBar();
+      updateCheckboxes();
+    });
 
     fetchPRs();
   </script>
