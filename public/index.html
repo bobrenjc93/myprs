@@ -545,6 +545,9 @@
       }
 
       const sortedGroups = [...groups.entries()].sort((a, b) => {
+        const aHasApproved = a[1].some(pr => pr.reviewDecision === "APPROVED") ? 1 : 0;
+        const bHasApproved = b[1].some(pr => pr.reviewDecision === "APPROVED") ? 1 : 0;
+        if (aHasApproved !== bHasApproved) return bHasApproved - aHasApproved;
         const aDate = new Date(a[1][0].updatedAt);
         const bDate = new Date(b[1][0].updatedAt);
         return oldestFirst ? aDate - bDate : bDate - aDate;
