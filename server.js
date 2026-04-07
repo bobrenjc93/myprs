@@ -37,29 +37,57 @@ function getActiveSleep() {
   return sleep;
 }
 
-app.get("/api/prs", (req, res) => {
-  const args = [
-    "search",
-    "prs",
-    "--author=@me",
-    "--state=open",
-    "--limit=200",
-    "--json",
-    "number,title,repository,updatedAt,url,isDraft,state,createdAt,labels,reviewDecision",
-  ];
-
-  execFile("gh", args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
-    if (err) {
-      console.error("gh error:", err.message);
-      return res.status(500).json({ error: "Failed to fetch PRs" });
-    }
-    try {
-      const prs = JSON.parse(stdout);
-      res.json(prs);
-    } catch (e) {
-      res.status(500).json({ error: "Failed to parse gh output" });
-    }
+function execGh(args) {
+  return new Promise((resolve, reject) => {
+    execFile("gh", args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+      if (err) return reject(err);
+      try { resolve(JSON.parse(stdout)); }
+      catch (e) { reject(e); }
+    });
   });
+}
+
+app.get("/api/prs", async (req, res) => {
+  try {
+    const prs = await execGh([
+      "search", "prs",
+      "--author=@me", "--state=open", "--limit=200",
+      "--json", "number,title,repository,updatedAt,url,isDraft,state,createdAt,labels",
+    ]);
+
+    // Group PRs by repo to batch-fetch reviewDecision
+    const byRepo = new Map();
+    for (const pr of prs) {
+      const repo = pr.repository.nameWithOwner;
+      if (!byRepo.has(repo)) byRepo.set(repo, []);
+      byRepo.get(repo).push(pr);
+    }
+
+    // Fetch reviewDecision per repo in parallel
+    await Promise.all([...byRepo.entries()].map(async ([repo, repoPrs]) => {
+      try {
+        const details = await execGh([
+          "pr", "list",
+          "--repo", repo,
+          "--author=@me",
+          "--state=open",
+          "--limit=200",
+          "--json", "number,reviewDecision",
+        ]);
+        const decisionMap = new Map(details.map(d => [d.number, d.reviewDecision]));
+        for (const pr of repoPrs) {
+          pr.reviewDecision = decisionMap.get(pr.number) || "";
+        }
+      } catch {
+        for (const pr of repoPrs) pr.reviewDecision = "";
+      }
+    }));
+
+    res.json(prs);
+  } catch (e) {
+    console.error("gh error:", e.message);
+    res.status(500).json({ error: "Failed to fetch PRs" });
+  }
 });
 
 app.get("/api/sleep", (req, res) => {
