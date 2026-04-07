@@ -45,7 +45,7 @@ app.get("/api/prs", (req, res) => {
     "--state=open",
     "--limit=200",
     "--json",
-    "number,title,repository,updatedAt,url,isDraft,state,createdAt,labels",
+    "number,title,repository,updatedAt,url,isDraft,state,createdAt,labels,reviewDecision",
   ];
 
   execFile("gh", args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {

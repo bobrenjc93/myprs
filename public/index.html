@@ -146,6 +146,15 @@
       font-weight: 500;
     }
 
+    .approved-badge {
+      background: rgba(63, 185, 80, 0.2);
+      color: #3fb950;
+      padding: 1px 6px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
     .sleep-badge {
       background: rgba(210, 153, 34, 0.2);
       color: #d29922;
@@ -495,6 +504,7 @@
                     <a class="pr-title" href="${pr.url}" target="_blank">${escapeHtml(pr.title)}</a>
                     <span class="pr-number">#${pr.number}</span>
                     ${pr.isDraft ? '<span class="draft-badge">Draft</span>' : ''}
+                    ${pr.reviewDecision === 'APPROVED' ? '<span class="approved-badge">Approved</span>' : ''}
                     ${sleeping ? `<span class="sleep-badge">Sleeping ${sleepRemaining(pr)}</span>` : ''}
                     ${isSleepSection ? `<button class="wake-btn" onclick="event.stopPropagation(); wakePR('${key}')">Wake</button>` : ''}
                     ${pr.labels.map(l => `<span class="label" style="${getLabelStyle(l)}">${escapeHtml(l.name)}</span>`).join('')}
@@ -518,6 +528,9 @@
       const filtered = showDrafts ? awakePRs : awakePRs.filter(pr => !pr.isDraft);
 
       const sorted = [...filtered].sort((a, b) => {
+        const aApproved = a.reviewDecision === "APPROVED" ? 1 : 0;
+        const bApproved = b.reviewDecision === "APPROVED" ? 1 : 0;
+        if (aApproved !== bApproved) return bApproved - aApproved;
         const da = new Date(a.updatedAt);
         const db = new Date(b.updatedAt);
         return oldestFirst ? da - db : db - da;
