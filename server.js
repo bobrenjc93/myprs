@@ -8,7 +8,7 @@ const PORT = 3000;
 const SLEEP_FILE = path.join(__dirname, "sleep.json");
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname, "public"), { etag: false, maxAge: 0 }));
 
 function readSleep() {
   try {
