@@ -242,6 +242,30 @@
 
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    .refresh-banner {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      color: #8b949e;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-bottom: 16px;
+    }
+
+    .spinner-sm {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid #30363d;
+      border-top-color: #58a6ff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      flex-shrink: 0;
+    }
+
     .error { text-align: center; padding: 40px; color: #f85149; }
 
     .collapsed .pr-list { display: none; }
@@ -352,8 +376,11 @@
   </div>
 
   <script>
+    const PR_CACHE_KEY = "myprs_cache_v1";
+
     let allPRs = [];
     let sleepData = {};
+    let refreshing = false;
     let showDrafts = true;
     let showSleeping = false;
     let oldestFirst = true;
@@ -396,8 +423,38 @@
       return `${days}d left`;
     }
 
+    function loadCache() {
+      try {
+        const raw = localStorage.getItem(PR_CACHE_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function saveCache() {
+      try {
+        localStorage.setItem(PR_CACHE_KEY, JSON.stringify({ prs: allPRs, sleep: sleepData }));
+      } catch {}
+    }
+
     async function fetchPRs() {
-      app.innerHTML = '<div class="loading"><div class="spinner"></div><div>Fetching PRs...</div></div>';
+      // Seed from cache so a refresh renders instantly while we fetch fresh data.
+      if (allPRs.length === 0) {
+        const cache = loadCache();
+        if (cache && Array.isArray(cache.prs) && cache.prs.length) {
+          allPRs = cache.prs;
+          sleepData = cache.sleep || {};
+        }
+      }
+
+      refreshing = true;
+      if (allPRs.length > 0) {
+        render(); // show cached data with a refreshing spinner on top
+      } else {
+        app.innerHTML = '<div class="loading"><div class="spinner"></div><div>Fetching PRs...</div></div>';
+      }
+
       try {
         const [prRes, sleepRes] = await Promise.all([
           fetch("/api/prs"),
@@ -406,12 +463,20 @@
         if (!prRes.ok) throw new Error("Failed to fetch PRs");
         allPRs = await prRes.json();
         sleepData = await sleepRes.json();
+        saveCache();
         selected.clear();
         updateActionBar();
-        render();
       } catch (e) {
-        app.innerHTML = '<div class="error">Failed to load PRs. Is gh authenticated?</div>';
+        if (allPRs.length === 0) {
+          refreshing = false;
+          app.innerHTML = '<div class="error">Failed to load PRs. Is gh authenticated?</div>';
+          return;
+        }
+        // Otherwise keep showing cached data.
+      } finally {
+        refreshing = false;
       }
+      render();
     }
 
     async function sleepPRs(keys, days) {
@@ -421,6 +486,7 @@
         body: JSON.stringify({ keys, days }),
       });
       sleepData = await res.json();
+      saveCache();
       selected.clear();
       updateActionBar();
       render();
@@ -429,6 +495,7 @@
     async function wakePR(key) {
       const res = await fetch(`/api/sleep/${encodeURIComponent(key)}`, { method: "DELETE" });
       sleepData = await res.json();
+      saveCache();
       render();
     }
 
@@ -643,6 +710,10 @@
       stats.textContent = `${filtered.length} PRs (${nonDraftCount} active, ${draftCount} draft, ${sleepingPRs.length} sleeping)`;
 
       let html = '';
+
+      if (refreshing) {
+        html += '<div class="refresh-banner"><span class="spinner-sm"></span>Refreshing&hellip;</div>';
+      }
 
       const attentionCount = filtered.filter(needsAttention).length;
       if (attentionCount > 0) {
