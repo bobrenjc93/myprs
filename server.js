@@ -47,6 +47,19 @@ function execGh(args) {
   });
 }
 
+// Parse the Dr. CI (pytorch-bot) comment body into a CI status.
+// Returns "red" when the Dr. CI status header is :x: (failures that need
+// attention), "green" when it's :white_check_mark: (mergeable, even with
+// unrelated/flaky failures), or null when the status can't be determined.
+function drciStatus(body) {
+  const start = body.indexOf("<!-- drci-comment-start -->");
+  const end = body.indexOf("<!-- drci-comment-end -->");
+  const section = start !== -1 && end !== -1 ? body.slice(start, end) : body;
+  if (/##\s*:x:/.test(section)) return "red";
+  if (/##\s*:white_check_mark:/.test(section)) return "green";
+  return null;
+}
+
 app.get("/api/prs", async (req, res) => {
   try {
     const prs = await execGh([
@@ -80,6 +93,28 @@ app.get("/api/prs", async (req, res) => {
         }
       } catch {
         for (const pr of repoPrs) pr.reviewDecision = "";
+      }
+    }));
+
+    // Fetch Dr. CI status for published (non-draft) PyTorch PRs. Dr. CI only
+    // runs in the pytorch org, so skip everything else to avoid wasted calls.
+    await Promise.all(prs.map(async (pr) => {
+      pr.ciStatus = null;
+      const owner = pr.repository.nameWithOwner.split("/")[0];
+      if (pr.isDraft || owner !== "pytorch") return;
+      try {
+        const data = await execGh([
+          "pr", "view", String(pr.number),
+          "--repo", pr.repository.nameWithOwner,
+          "--json", "comments",
+        ]);
+        const comments = data.comments || [];
+        const drci = [...comments].reverse().find(
+          c => c.author && c.author.login === "pytorch-bot" && c.body.includes("drci-comment-start")
+        );
+        if (drci) pr.ciStatus = drciStatus(drci.body);
+      } catch {
+        pr.ciStatus = null;
       }
     }));
 

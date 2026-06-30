@@ -155,6 +155,37 @@
       font-weight: 500;
     }
 
+    .changes-requested-badge {
+      background: rgba(248, 81, 73, 0.2);
+      color: #f85149;
+      padding: 1px 6px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .ci-fail-badge {
+      background: #f85149;
+      color: #0d1117;
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    .attention-banner {
+      background: rgba(248, 81, 73, 0.15);
+      border: 1px solid #f85149;
+      color: #f85149;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 14px;
+      margin-bottom: 16px;
+    }
+
     .sleep-badge {
       background: rgba(210, 153, 34, 0.2);
       color: #d29922;
@@ -288,6 +319,13 @@
     }
 
     .pr-item.sleeping { opacity: 0.6; }
+
+    .pr-item.ci-failing {
+      background: rgba(248, 81, 73, 0.08);
+      border-left: 3px solid #f85149;
+    }
+
+    .pr-item.ci-failing:hover { background: rgba(248, 81, 73, 0.14); }
   </style>
 </head>
 <body>
@@ -336,6 +374,11 @@
 
     function prKey(pr) {
       return `${pr.repository.nameWithOwner}#${pr.number}`;
+    }
+
+    // A published PR whose pytorch Dr. CI status is not green needs attention.
+    function needsAttention(pr) {
+      return !pr.isDraft && pr.ciStatus === "red";
     }
 
     function isSleeping(pr) {
@@ -492,8 +535,9 @@
             ${prs.map(pr => {
               const key = prKey(pr);
               const sleeping = isSleeping(pr);
+              const ciFailing = needsAttention(pr);
               return `
-              <li class="pr-item ${selected.has(key) ? 'selected' : ''} ${sleeping ? 'sleeping' : ''}"
+              <li class="pr-item ${selected.has(key) ? 'selected' : ''} ${sleeping ? 'sleeping' : ''} ${ciFailing ? 'ci-failing' : ''}"
                   data-key="${key}" onclick="handleRowClick('${key}', event)">
                 <input type="checkbox" class="pr-checkbox"
                   ${selected.has(key) ? 'checked' : ''}
@@ -503,7 +547,9 @@
                   <div class="pr-title-row">
                     <a class="pr-title" href="${pr.url}" target="_blank">${escapeHtml(pr.title)}</a>
                     <span class="pr-number">#${pr.number}</span>
+                    ${ciFailing ? '<span class="ci-fail-badge">&#9888; CI failing</span>' : ''}
                     ${pr.isDraft ? '<span class="draft-badge">Draft</span>' : ''}
+                    ${pr.reviewDecision === 'CHANGES_REQUESTED' ? '<span class="changes-requested-badge">Changes requested</span>' : ''}
                     ${pr.reviewDecision === 'APPROVED' ? '<span class="approved-badge">Approved</span>' : ''}
                     ${sleeping ? `<span class="sleep-badge">Sleeping ${sleepRemaining(pr)}</span>` : ''}
                     ${isSleepSection ? `<button class="wake-btn" onclick="event.stopPropagation(); wakePR('${key}')">Wake</button>` : ''}
@@ -527,8 +573,11 @@
       // Filter drafts in awake list
       const filtered = showDrafts ? awakePRs : awakePRs.filter(pr => !pr.isDraft);
 
-      // Priority: approved first, then open (non-draft), then drafts
+      // Published PRs with failing CI are the most urgent, then requested
+      // changes, so actionable follow-ups stay at the top.
       function prSortPriority(pr) {
+        if (needsAttention(pr)) return 4;
+        if (pr.reviewDecision === "CHANGES_REQUESTED") return 3;
         if (pr.reviewDecision === "APPROVED") return 2;
         if (!pr.isDraft) return 1;
         return 0;
@@ -552,6 +601,8 @@
       }
 
       function groupSortPriority(prs) {
+        if (prs.some(needsAttention)) return 4;
+        if (prs.some(pr => pr.reviewDecision === "CHANGES_REQUESTED")) return 3;
         if (prs.some(pr => pr.reviewDecision === "APPROVED")) return 2;
         if (prs.some(pr => !pr.isDraft)) return 1;
         return 0;
@@ -593,10 +644,15 @@
 
       let html = '';
 
+      const attentionCount = filtered.filter(needsAttention).length;
+      if (attentionCount > 0) {
+        html += `<div class="attention-banner">&#9888; ${attentionCount} published PR${attentionCount === 1 ? '' : 's'} with failing CI &mdash; needs attention</div>`;
+      }
+
       if (sorted.length === 0 && (!showSleeping || sleepingPRs.length === 0)) {
-        html = '<div class="loading">No PRs found.</div>';
+        html += '<div class="loading">No PRs found.</div>';
       } else {
-        html = sortedGroups.map(([repo, prs]) => renderGroup(repo, prs, false)).join('');
+        html += sortedGroups.map(([repo, prs]) => renderGroup(repo, prs, false)).join('');
       }
 
       if (showSleeping && sleepingPRs.length > 0) {
