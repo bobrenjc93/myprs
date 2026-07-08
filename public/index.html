@@ -772,6 +772,9 @@
     });
 
     fetchPRs();
-  </script>
+
+    // Auto-refresh in the background every hour.
+    setInterval(fetchPRs, 60 * 60 * 1000);
+</script>
 </body>
 </html>
