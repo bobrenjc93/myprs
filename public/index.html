@@ -413,6 +413,14 @@
 
     .pr-item.sleeping { opacity: 0.6; }
 
+    .pr-item.no-reviewers {
+      background: rgba(163, 113, 247, 0.08);
+      border-left: 3px solid #a371f7;
+    }
+
+    .pr-item.no-reviewers:hover { background: rgba(163, 113, 247, 0.14); }
+
+    /* stale and ci-failing are defined after no-reviewers so they win when a PR is both */
     .pr-item.stale {
       background: rgba(210, 153, 34, 0.08);
       border-left: 3px solid #d29922;
@@ -748,8 +756,9 @@
               const sleeping = isSleeping(pr);
               const ciFailing = needsAttention(pr);
               const stale = isStale(pr);
+              const noReview = noReviewers(pr);
               return `
-              <li class="pr-item ${selected.has(key) ? 'selected' : ''} ${sleeping ? 'sleeping' : ''} ${stale ? 'stale' : ''} ${ciFailing ? 'ci-failing' : ''}"
+              <li class="pr-item ${selected.has(key) ? 'selected' : ''} ${sleeping ? 'sleeping' : ''} ${noReview ? 'no-reviewers' : ''} ${stale ? 'stale' : ''} ${ciFailing ? 'ci-failing' : ''}"
                   data-key="${key}" onclick="handleRowClick('${key}', event)">
                 <input type="checkbox" class="pr-checkbox"
                   ${selected.has(key) ? 'checked' : ''}
