@@ -184,6 +184,15 @@
       font-weight: 600;
     }
 
+    .no-reviewers-badge {
+      background: rgba(163, 113, 247, 0.2);
+      color: #a371f7;
+      padding: 1px 6px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
     .attention-banner {
       background: rgba(248, 81, 73, 0.15);
       border: 1px solid #f85149;
@@ -194,6 +203,44 @@
       font-size: 14px;
       margin-bottom: 16px;
     }
+
+    .auth-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      background: rgba(210, 153, 34, 0.15);
+      border: 1px solid #d29922;
+      color: #e3b341;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 14px;
+      margin-bottom: 16px;
+    }
+
+    .auth-banner code {
+      background: rgba(255, 255, 255, 0.08);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+
+    .verify-btn {
+      background: #d29922;
+      border: none;
+      color: #0d1117;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .verify-btn:hover { background: #e3b341; }
+    .verify-btn:disabled { opacity: 0.6; cursor: default; }
 
     .sleep-badge {
       background: rgba(210, 153, 34, 0.2);
@@ -330,6 +377,19 @@
 
     .action-bar .sleep-btn:hover { background: #e3b341; }
 
+    .action-bar .wake-sel-btn {
+      background: #1f6feb;
+      border: none;
+      color: #fff;
+      padding: 8px 18px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .action-bar .wake-sel-btn:hover { background: #388bfd; }
+
     .action-bar .clear-btn {
       background: none;
       border: 1px solid #30363d;
@@ -390,6 +450,7 @@
   <div class="action-bar" id="actionBar">
     <span class="count" id="selCount"></span>
     <button class="sleep-btn" id="sleepSelectedBtn">Sleep 1 week</button>
+    <button class="wake-sel-btn" id="wakeSelectedBtn">Wake</button>
     <button class="clear-btn" id="clearSelBtn">Clear</button>
   </div>
 
@@ -400,6 +461,7 @@
     let sleepData = {};
     let refreshing = false;
     let lastRefreshed = null;
+    let pingAuthError = false;
     let showDrafts = true;
     let showSleeping = false;
     let oldestFirst = true;
@@ -417,6 +479,7 @@
     const actionBar = document.getElementById("actionBar");
     const selCount = document.getElementById("selCount");
     const sleepSelectedBtn = document.getElementById("sleepSelectedBtn");
+    const wakeSelectedBtn = document.getElementById("wakeSelectedBtn");
     const clearSelBtn = document.getElementById("clearSelBtn");
 
     function prKey(pr) {
@@ -447,7 +510,14 @@
       return !pr.isDraft && workdaysSinceActivity(pr) >= 3;
     }
 
+    // A published PR that has no reviewers requested and no reviews yet.
+    function noReviewers(pr) {
+      return !pr.isDraft && pr.hasReviewers === false;
+    }
+
     function isSleeping(pr) {
+      // Approved PRs are always awake, even if a sleep entry lingers.
+      if (pr.reviewDecision === "APPROVED") return false;
       const entry = sleepData[prKey(pr)];
       if (!entry) return false;
       return new Date(entry.until).getTime() > Date.now();
@@ -481,6 +551,19 @@
       lastRefreshEl.textContent = lastRefreshed ? `Updated ${timeAgo(lastRefreshed)}` : "";
     }
 
+    async function verifyToken() {
+      const btn = document.getElementById("verifyTokenBtn");
+      if (btn) { btn.disabled = true; btn.textContent = "Checking…"; }
+      try {
+        const res = await fetch("/api/verify-token", { method: "POST" });
+        const data = await res.json();
+        pingAuthError = !!data.authError;
+      } catch {
+        pingAuthError = true;
+      }
+      render();
+    }
+
     async function fetchPRs() {
       // Seed from cache so a refresh renders instantly while we fetch fresh data.
       if (allPRs.length === 0) {
@@ -500,13 +583,17 @@
       }
 
       try {
-        const [prRes, sleepRes] = await Promise.all([
+        const [prRes, sleepRes, pingRes] = await Promise.all([
           fetch("/api/prs"),
           fetch("/api/sleep"),
+          fetch("/api/ping-status").catch(() => null),
         ]);
         if (!prRes.ok) throw new Error("Failed to fetch PRs");
         allPRs = await prRes.json();
         sleepData = await sleepRes.json();
+        if (pingRes && pingRes.ok) {
+          try { pingAuthError = !!(await pingRes.json()).authError; } catch {}
+        }
         lastRefreshed = Date.now();
         saveCache();
         selected.clear();
@@ -541,6 +628,18 @@
       const res = await fetch(`/api/sleep/${encodeURIComponent(key)}`, { method: "DELETE" });
       sleepData = await res.json();
       saveCache();
+      render();
+    }
+
+    async function wakePRs(keys) {
+      // Sequential so the server's read-modify-write of sleep.json doesn't race.
+      for (const key of keys) {
+        const res = await fetch(`/api/sleep/${encodeURIComponent(key)}`, { method: "DELETE" });
+        sleepData = await res.json();
+      }
+      saveCache();
+      selected.clear();
+      updateActionBar();
       render();
     }
 
@@ -662,6 +761,7 @@
                     <span class="pr-number">#${pr.number}</span>
                     ${ciFailing ? '<span class="ci-fail-badge">&#9888; CI failing</span>' : ''}
                     ${stale ? `<span class="stale-badge">Stale &middot; ${workdaysSinceActivity(pr)} workday${workdaysSinceActivity(pr) === 1 ? '' : 's'}</span>` : ''}
+                    ${noReviewers(pr) ? '<span class="no-reviewers-badge">&#128100; No reviewers</span>' : ''}
                     ${pr.isDraft ? '<span class="draft-badge">Draft</span>' : ''}
                     ${pr.reviewDecision === 'CHANGES_REQUESTED' ? '<span class="changes-requested-badge">Changes requested</span>' : ''}
                     ${pr.reviewDecision === 'APPROVED' ? '<span class="approved-badge">Approved</span>' : ''}
@@ -761,6 +861,13 @@
 
       let html = '';
 
+      if (pingAuthError) {
+        html += `<div class="auth-banner">
+          <span>&#9888; Hey you &mdash; refresh your token! PR alerts can't be sent. Run <code>jf auth</code> in your terminal, then verify.</span>
+          <button class="verify-btn" id="verifyTokenBtn" onclick="verifyToken()">Verify token</button>
+        </div>`;
+      }
+
       if (refreshing) {
         html += '<div class="refresh-banner"><span class="spinner-sm"></span>Refreshing&hellip;</div>';
       }
@@ -813,6 +920,11 @@
     sleepSelectedBtn.addEventListener("click", () => {
       if (selected.size === 0) return;
       sleepPRs([...selected], 7);
+    });
+
+    wakeSelectedBtn.addEventListener("click", () => {
+      if (selected.size === 0) return;
+      wakePRs([...selected]);
     });
 
     clearSelBtn.addEventListener("click", () => {

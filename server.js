@@ -9,6 +9,10 @@ const PORT = 3000;
 const SLEEP_FILE = path.join(__dirname, "sleep.json");
 const NOTIFIED_FILE = path.join(__dirname, "notified.json");
 
+// Set true when a ping fails because the meta auth token is expired/invalid,
+// so the UI can prompt the user to run `jf auth`. Cleared on a successful ping.
+let pingAuthError = false;
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public"), { etag: false, maxAge: 0 }));
 
@@ -74,11 +78,24 @@ function writeNotified(data) {
   fs.writeFileSync(NOTIFIED_FILE, JSON.stringify(data, null, 2));
 }
 
+// Returns true only if the ping was actually delivered. `meta` exits 0 even
+// when it silently fails on an expired auth token, so we also scan its output
+// for auth-failure markers and treat those as failures.
 function sendPing(message) {
   return new Promise((resolve) => {
-    execFile("meta", ["pingme.message", "send", `--message=${message}`], (err) => {
-      if (err) console.error("pingme error:", err.message);
-      resolve();
+    execFile("meta", ["pingme.message", "send", `--message=${message}`], (err, stdout, stderr) => {
+      if (err) {
+        console.error("pingme error:", err.message);
+        return resolve(false);
+      }
+      const out = `${stdout || ""}${stderr || ""}`;
+      if (/OAuth token is expired|No valid Crypto Auth Tokens|token is expired or invalid/i.test(out)) {
+        console.error("pingme auth failure (run `jf auth`):", out.trim());
+        pingAuthError = true;
+        return resolve(false);
+      }
+      pingAuthError = false;
+      resolve(true);
     });
   });
 }
@@ -102,9 +119,13 @@ async function notifyBrokenCI(prs) {
     if (pr.isDraft || pr.ciStatus !== "red") continue;
     const key = `${pr.repository.nameWithOwner}#${pr.number}`;
     if (notified[key]) continue;
-    notified[key] = true;
-    changed = true;
-    await sendPing(`[${host}] Broken CI: ${pr.title} ${pr.url}`);
+    // Only mark as notified once the ping is confirmed sent, so a failed send
+    // (e.g. expired auth) is retried on the next refresh instead of lost.
+    const sent = await sendPing(`[${host}] Broken CI: ${pr.title} ${pr.url}`);
+    if (sent) {
+      notified[key] = true;
+      changed = true;
+    }
   }
 
   for (const key of Object.keys(notified)) {
@@ -142,14 +163,22 @@ app.get("/api/prs", async (req, res) => {
           "--author=@me",
           "--state=open",
           "--limit=200",
-          "--json", "number,reviewDecision",
+          "--json", "number,reviewDecision,reviewRequests,reviews",
         ]);
-        const decisionMap = new Map(details.map(d => [d.number, d.reviewDecision]));
+        const detailMap = new Map(details.map(d => [d.number, d]));
         for (const pr of repoPrs) {
-          pr.reviewDecision = decisionMap.get(pr.number) || "";
+          const d = detailMap.get(pr.number);
+          pr.reviewDecision = (d && d.reviewDecision) || "";
+          const reqs = d && d.reviewRequests ? d.reviewRequests.length : 0;
+          const revs = d && d.reviews ? d.reviews.length : 0;
+          pr.hasReviewers = reqs > 0 || revs > 0;
         }
       } catch {
-        for (const pr of repoPrs) pr.reviewDecision = "";
+        // On failure, assume reviewers exist so we don't falsely nag.
+        for (const pr of repoPrs) {
+          pr.reviewDecision = "";
+          pr.hasReviewers = true;
+        }
       }
     }));
 
@@ -175,6 +204,19 @@ app.get("/api/prs", async (req, res) => {
       }
     }));
 
+    // Auto-wake any PR that has since been approved.
+    const sleep = getActiveSleep();
+    let sleepChanged = false;
+    for (const pr of prs) {
+      if (pr.reviewDecision !== "APPROVED") continue;
+      const key = `${pr.repository.nameWithOwner}#${pr.number}`;
+      if (sleep[key]) {
+        delete sleep[key];
+        sleepChanged = true;
+      }
+    }
+    if (sleepChanged) writeSleep(sleep);
+
     // Fire-and-forget so a slow/failed ping never blocks the response.
     notifyBrokenCI(prs).catch(e => console.error("notify error:", e.message));
 
@@ -183,6 +225,18 @@ app.get("/api/prs", async (req, res) => {
     console.error("gh error:", e.message);
     res.status(500).json({ error: "Failed to fetch PRs" });
   }
+});
+
+// Whether the last ping failed due to an expired/invalid auth token.
+app.get("/api/ping-status", (req, res) => {
+  res.json({ authError: pingAuthError });
+});
+
+// Actively test the token by sending a confirmation ping. Updates pingAuthError
+// as a side effect so the UI banner clears once the token is refreshed.
+app.post("/api/verify-token", async (req, res) => {
+  const ok = await sendPing(`[${os.hostname()}] myprs: token verified ✅`);
+  res.json({ authError: pingAuthError, ok });
 });
 
 app.get("/api/sleep", (req, res) => {
