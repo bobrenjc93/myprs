@@ -311,6 +311,16 @@
       margin-bottom: 16px;
     }
 
+    .refresh-error-banner {
+      background: rgba(248, 81, 73, 0.08);
+      border: 1px solid rgba(248, 81, 73, 0.4);
+      color: #ff7b72;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-bottom: 16px;
+    }
+
     .spinner-sm {
       display: inline-block;
       width: 14px;
@@ -464,10 +474,12 @@
 
   <script>
     const PR_CACHE_KEY = "myprs_cache_v1";
+    const AUTO_REFRESH_MS = 5 * 60 * 1000;
 
     let allPRs = [];
     let sleepData = {};
     let refreshing = false;
+    let refreshError = false;
     let lastRefreshed = null;
     let pingAuthError = false;
     let showDrafts = true;
@@ -573,6 +585,10 @@
     }
 
     async function fetchPRs() {
+      // Avoid overlapping requests, which can let an older response overwrite
+      // a newer one when a manual and automatic refresh happen together.
+      if (refreshing) return;
+
       // Seed from cache so a refresh renders instantly while we fetch fresh data.
       if (allPRs.length === 0) {
         const cache = loadCache();
@@ -592,21 +608,23 @@
 
       try {
         const [prRes, sleepRes, pingRes] = await Promise.all([
-          fetch("/api/prs"),
-          fetch("/api/sleep"),
-          fetch("/api/ping-status").catch(() => null),
+          fetch("/api/prs", { cache: "no-store" }),
+          fetch("/api/sleep", { cache: "no-store" }),
+          fetch("/api/ping-status", { cache: "no-store" }).catch(() => null),
         ]);
         if (!prRes.ok) throw new Error("Failed to fetch PRs");
         allPRs = await prRes.json();
-        sleepData = await sleepRes.json();
+        if (sleepRes.ok) sleepData = await sleepRes.json();
         if (pingRes && pingRes.ok) {
           try { pingAuthError = !!(await pingRes.json()).authError; } catch {}
         }
         lastRefreshed = Date.now();
+        refreshError = false;
         saveCache();
         selected.clear();
         updateActionBar();
       } catch (e) {
+        refreshError = true;
         if (allPRs.length === 0) {
           refreshing = false;
           app.innerHTML = '<div class="error">Failed to load PRs. Is gh authenticated?</div>';
@@ -881,6 +899,10 @@
         html += '<div class="refresh-banner"><span class="spinner-sm"></span>Refreshing&hellip;</div>';
       }
 
+      if (refreshError) {
+        html += '<div class="refresh-error-banner">Refresh failed. Showing data from the last successful update.</div>';
+      }
+
       const attentionCount = filtered.filter(needsAttention).length;
       if (attentionCount > 0) {
         html += `<div class="attention-banner">&#9888; ${attentionCount} published PR${attentionCount === 1 ? '' : 's'} with failing CI &mdash; needs attention</div>`;
@@ -944,8 +966,15 @@
 
     fetchPRs();
 
-    // Auto-refresh in the background every hour.
-    setInterval(fetchPRs, 60 * 60 * 1000);
+    // Poll regularly, and refresh when returning from another tab after enough
+    // time to plausibly merge or close a PR there.
+    setInterval(fetchPRs, AUTO_REFRESH_MS);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" &&
+          (!lastRefreshed || Date.now() - lastRefreshed >= 60 * 1000)) {
+        fetchPRs();
+      }
+    });
 
     // Keep the "Updated Xm ago" label current between refreshes.
     setInterval(updateLastRefresh, 30 * 1000);

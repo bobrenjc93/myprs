@@ -15,6 +15,10 @@ let pingAuthError = false;
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public"), { etag: false, maxAge: 0 }));
+app.use("/api", (req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
 
 function readSleep() {
   try {
@@ -50,6 +54,16 @@ function execGh(args) {
       try { resolve(JSON.parse(stdout)); }
       catch (e) { reject(e); }
     });
+  });
+}
+
+// GitHub's search index can briefly return PRs that were just merged or
+// closed. Only prune results for repositories whose canonical open-PR query
+// succeeded; a failed verification must not make an entire repo disappear.
+function filterVerifiedOpen(prs, verifiedRepos, verifiedOpen) {
+  return prs.filter((pr) => {
+    const repo = pr.repository.nameWithOwner;
+    return !verifiedRepos.has(repo) || verifiedOpen.has(`${repo}#${pr.number}`);
   });
 }
 
@@ -140,7 +154,7 @@ async function notifyBrokenCI(prs) {
 
 app.get("/api/prs", async (req, res) => {
   try {
-    const prs = await execGh([
+    let prs = await execGh([
       "search", "prs",
       "--author=@me", "--state=open", "--limit=200",
       "--json", "number,title,repository,updatedAt,url,isDraft,state,createdAt,labels",
@@ -154,7 +168,10 @@ app.get("/api/prs", async (req, res) => {
       byRepo.get(repo).push(pr);
     }
 
-    // Fetch reviewDecision per repo in parallel
+    // Fetch reviewDecision per repo in parallel. This list is also the
+    // canonical source of truth for whether each search result is still open.
+    const verifiedRepos = new Set();
+    const verifiedOpen = new Set();
     await Promise.all([...byRepo.entries()].map(async ([repo, repoPrs]) => {
       try {
         const details = await execGh([
@@ -165,6 +182,8 @@ app.get("/api/prs", async (req, res) => {
           "--limit=200",
           "--json", "number,reviewDecision,reviewRequests,reviews",
         ]);
+        verifiedRepos.add(repo);
+        for (const d of details) verifiedOpen.add(`${repo}#${d.number}`);
         const detailMap = new Map(details.map(d => [d.number, d]));
         for (const pr of repoPrs) {
           const d = detailMap.get(pr.number);
@@ -181,6 +200,8 @@ app.get("/api/prs", async (req, res) => {
         }
       }
     }));
+
+    prs = filterVerifiedOpen(prs, verifiedRepos, verifiedOpen);
 
     // Fetch Dr. CI status for published (non-draft) PyTorch PRs. Dr. CI only
     // runs in the pytorch org, so skip everything else to avoid wasted calls.
@@ -264,6 +285,10 @@ app.delete("/api/sleep/:key", (req, res) => {
   res.json(sleep);
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Server running at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = { app, filterVerifiedOpen };
