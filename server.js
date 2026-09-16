@@ -67,6 +67,26 @@ function filterVerifiedOpen(prs, verifiedRepos, verifiedOpen) {
   });
 }
 
+// GitHub can leave reviewDecision empty even when submitted reviews exist.
+// Keep its decision when present; otherwise use each reviewer's latest verdict.
+function effectiveReviewDecision(pr) {
+  if (pr?.reviewDecision) return pr.reviewDecision;
+
+  const verdicts = new Map();
+  // gh returns reviews in chronological order. Comments and pending reviews
+  // do not replace an earlier verdict; a dismissed review no longer counts.
+  for (const review of pr?.reviews || []) {
+    const reviewer = review.author?.login;
+    if (!reviewer || !["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state)) continue;
+    verdicts.set(reviewer, review.state);
+  }
+
+  const states = [...verdicts.values()];
+  if (states.includes("CHANGES_REQUESTED")) return "CHANGES_REQUESTED";
+  if (states.includes("APPROVED")) return "APPROVED";
+  return "";
+}
+
 // Parse the Dr. CI (pytorch-bot) comment body into a CI status.
 // Returns "red" when the Dr. CI status header is :x: (failures that need
 // attention), "green" when it's :white_check_mark: (mergeable, even with
@@ -160,7 +180,7 @@ app.get("/api/prs", async (req, res) => {
       "--json", "number,title,repository,updatedAt,url,isDraft,state,createdAt,labels",
     ]);
 
-    // Group PRs by repo to batch-fetch reviewDecision
+    // Group PRs by repo to batch-fetch review details.
     const byRepo = new Map();
     for (const pr of prs) {
       const repo = pr.repository.nameWithOwner;
@@ -168,7 +188,7 @@ app.get("/api/prs", async (req, res) => {
       byRepo.get(repo).push(pr);
     }
 
-    // Fetch reviewDecision per repo in parallel. This list is also the
+    // Fetch review details per repo in parallel. This list is also the
     // canonical source of truth for whether each search result is still open.
     const verifiedRepos = new Set();
     const verifiedOpen = new Set();
@@ -187,7 +207,7 @@ app.get("/api/prs", async (req, res) => {
         const detailMap = new Map(details.map(d => [d.number, d]));
         for (const pr of repoPrs) {
           const d = detailMap.get(pr.number);
-          pr.reviewDecision = (d && d.reviewDecision) || "";
+          pr.reviewDecision = effectiveReviewDecision(d);
           const reqs = d && d.reviewRequests ? d.reviewRequests.length : 0;
           const revs = d && d.reviews ? d.reviews.length : 0;
           pr.hasReviewers = reqs > 0 || revs > 0;
@@ -291,4 +311,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, filterVerifiedOpen };
+module.exports = { app, filterVerifiedOpen, effectiveReviewDecision };
