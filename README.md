@@ -5,11 +5,12 @@ A personal dashboard for viewing all your open GitHub pull requests in one place
 ## Features
 
 - Groups PRs by repository
+- Pin repositories to the top with the Pin button in each repo header; pins are saved in your browser
 - Sorts approved PRs to the top, then open PRs, then drafts
 - Sleep/wake PRs to temporarily hide them
 - Multi-select with shift-click for bulk actions
 - Toggle draft and sleeping PR visibility
-- Sort by oldest or newest first
+- Sort by oldest or newest first (newest by default)
 
 ## Prerequisites
 

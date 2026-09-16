@@ -66,13 +66,14 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 12px;
       cursor: pointer;
       user-select: none;
     }
 
     .repo-header:hover { background: #1c2128; }
 
-    .repo-header a { color: #58a6ff; text-decoration: none; }
+    .repo-header a { color: #58a6ff; text-decoration: none; overflow-wrap: anywhere; min-width: 0; }
     .repo-header a:hover { text-decoration: underline; }
 
     .repo-count {
@@ -83,6 +84,24 @@
       font-size: 12px;
       font-weight: 500;
     }
+
+    .repo-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .pin-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+
+    .pin-btn svg { width: 14px; height: 14px; }
+    .pin-btn:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
 
     .pr-list { list-style: none; }
 
@@ -347,6 +366,7 @@
       display: flex;
       align-items: center;
       gap: 8px;
+      min-width: 0;
     }
 
     /* Selection action bar */
@@ -453,7 +473,7 @@
     <div class="controls">
       <span class="stats" id="stats"></span>
       <span class="stats" id="lastRefresh"></span>
-      <button class="btn" id="sortBtn" title="Toggle sort order">Oldest first</button>
+      <button class="btn" id="sortBtn" title="Toggle sort order">Newest first</button>
       <button class="btn active" id="draftToggle">Drafts</button>
       <button class="btn" id="sleepToggle">Sleeping</button>
       <button class="btn" id="refreshBtn">Refresh</button>
@@ -474,7 +494,10 @@
 
   <script>
     const PR_CACHE_KEY = "myprs_cache_v1";
+    const PINNED_REPOS_KEY = "myprs_pinned_repos_v1";
     const AUTO_REFRESH_MS = 5 * 60 * 1000;
+    const pinnedRepos = loadPinnedRepos();
+    const collapsedGroups = new Set();
 
     let allPRs = [];
     let sleepData = {};
@@ -484,7 +507,7 @@
     let pingAuthError = false;
     let showDrafts = true;
     let showSleeping = false;
-    let oldestFirst = true;
+    let oldestFirst = false;
     let selected = new Set();    // set of PR keys
     let lastClickedKey = null;   // for shift-click
     let renderedKeys = [];       // flat ordered list of visible PR keys for shift-select
@@ -559,6 +582,26 @@
       } catch {
         return null;
       }
+    }
+
+    function loadPinnedRepos() {
+      try {
+        const repos = JSON.parse(localStorage.getItem(PINNED_REPOS_KEY));
+        return new Set(Array.isArray(repos) ? repos.filter(repo => typeof repo === "string") : []);
+      } catch {
+        return new Set();
+      }
+    }
+
+    function toggleRepoPin(button) {
+      const { repo, groupKey } = button.closest(".repo-group").dataset;
+      if (pinnedRepos.has(repo)) pinnedRepos.delete(repo);
+      else pinnedRepos.add(repo);
+      try {
+        localStorage.setItem(PINNED_REPOS_KEY, JSON.stringify([...pinnedRepos]));
+      } catch {}
+      render();
+      app.querySelector(`[data-group-key="${groupKey}"] .pin-btn`)?.focus({ preventScroll: true });
     }
 
     function saveCache() {
@@ -759,14 +802,27 @@
     }
 
     function renderGroup(repo, prs, isSleepSection) {
+      const pinned = pinnedRepos.has(repo);
+      const groupKey = `${isSleepSection ? 'sleeping' : 'awake'}:${repo}`;
       return `
-        <div class="repo-group" data-repo="${repo}">
+        <div class="repo-group ${collapsedGroups.has(groupKey) ? 'collapsed' : ''}" data-repo="${repo}" data-group-key="${groupKey}">
           <div class="repo-header" onclick="toggleGroup(this)">
             <div class="repo-left">
               <span class="collapse-icon">&#9660;</span>
               <a href="https://github.com/${repo}" target="_blank" onclick="event.stopPropagation()">${repo}</a>
             </div>
-            <span class="repo-count">${prs.length}</span>
+            <div class="repo-actions">
+              <button type="button" class="btn pin-btn ${pinned ? 'active' : ''}"
+                aria-pressed="${pinned}" aria-label="${pinned ? 'Unpin' : 'Pin'} ${repo}"
+                title="${pinned ? 'Unpin' : 'Pin'} ${repo}${pinned ? '' : ' to the top'}"
+                onclick="event.stopPropagation(); toggleRepoPin(this)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M16 3 21 8 17 9 14 12 14 16 12 18 6 12 8 10 12 10 15 7Z M9 15 3 21"/>
+                </svg>
+                ${pinned ? 'Pinned' : 'Pin'}
+              </button>
+              <span class="repo-count">${prs.length}</span>
+            </div>
           </div>
           <ul class="pr-list">
             ${prs.map(pr => {
@@ -852,6 +908,8 @@
       }
 
       const sortedGroups = [...groups.entries()].sort((a, b) => {
+        const pinOrder = Number(pinnedRepos.has(b[0])) - Number(pinnedRepos.has(a[0]));
+        if (pinOrder !== 0) return pinOrder;
         const pa = groupSortPriority(a[1]);
         const pb = groupSortPriority(b[1]);
         if (pa !== pb) return pb - pa;
@@ -873,9 +931,12 @@
         if (!sleepGroups.has(repo)) sleepGroups.set(repo, []);
         sleepGroups.get(repo).push(pr);
       }
+      const sortedSleepGroups = [...sleepGroups.entries()].sort((a, b) =>
+        Number(pinnedRepos.has(b[0])) - Number(pinnedRepos.has(a[0]))
+      );
 
       if (showSleeping) {
-        for (const [, prs] of sleepGroups) {
+        for (const [, prs] of sortedSleepGroups) {
           for (const pr of prs) renderedKeys.push(prKey(pr));
         }
       }
@@ -916,7 +977,7 @@
 
       if (showSleeping && sleepingPRs.length > 0) {
         html += '<div class="section-label">Sleeping</div>';
-        html += [...sleepGroups.entries()]
+        html += sortedSleepGroups
           .map(([repo, prs]) => renderGroup(repo, prs, true))
           .join('');
       }
@@ -925,7 +986,10 @@
     }
 
     function toggleGroup(header) {
-      header.parentElement.classList.toggle("collapsed");
+      const group = header.parentElement;
+      const collapsed = group.classList.toggle("collapsed");
+      if (collapsed) collapsedGroups.add(group.dataset.groupKey);
+      else collapsedGroups.delete(group.dataset.groupKey);
     }
 
     draftToggle.addEventListener("click", () => {
