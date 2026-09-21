@@ -156,6 +156,16 @@
 
     .pr-number { color: #8b949e; font-size: 13px; }
 
+    .stack-badge {
+      background: #21262d;
+      color: #8b949e;
+      padding: 1px 6px;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
     .draft-badge {
       background: #30363d;
       color: #8b949e;
@@ -183,16 +193,21 @@
       font-weight: 500;
     }
 
-    .ci-fail-badge {
-      background: #f85149;
-      color: #0d1117;
-      padding: 1px 8px;
+    .signal-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 1px 6px;
       border-radius: 10px;
       font-size: 11px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.3px;
+      font-weight: 600;
+      white-space: nowrap;
     }
+
+    .signal-badge svg { width: 12px; height: 12px; flex-shrink: 0; }
+    .signal-badge.green { background: rgba(63, 185, 80, 0.2); color: #3fb950; }
+    .signal-badge.red { background: rgba(248, 81, 73, 0.2); color: #f85149; }
+    .signal-badge.pending { background: rgba(210, 153, 34, 0.2); color: #d29922; }
 
     .stale-badge {
       background: rgba(210, 153, 34, 0.2);
@@ -493,13 +508,13 @@
   </div>
 
   <script>
-    const PR_CACHE_KEY = "myprs_cache_v1";
     const PINNED_REPOS_KEY = "myprs_pinned_repos_v1";
     const AUTO_REFRESH_MS = 5 * 60 * 1000;
     const pinnedRepos = loadPinnedRepos();
     const collapsedGroups = new Set();
 
     let allPRs = [];
+    let hasSnapshot = false;
     let sleepData = {};
     let refreshing = false;
     let refreshError = false;
@@ -529,7 +544,20 @@
       return `${pr.repository.nameWithOwner}#${pr.number}`;
     }
 
-    // A published PR whose pytorch Dr. CI status is not green needs attention.
+    function countLabel(count, noun) {
+      return `${count} ${noun}${count === 1 ? '' : 's'}`;
+    }
+
+    function rowSummary(prs) {
+      const totalPRs = prs.reduce((total, pr) => total + (pr.stack?.numbers.length || 1), 0);
+      return `${prs.some(pr => pr.stack) ? `${countLabel(prs.length, 'item')} · ` : ''}${countLabel(totalPRs, 'PR')}`;
+    }
+
+    function stackDescription(pr) {
+      return `Stack of ${countLabel(pr.stack.numbers.length, 'open PR')}. #${pr.number} is the bottom PR and lands first.`;
+    }
+
+    // A published PR with an explicit failing PyTorch CI signal needs attention.
     function needsAttention(pr) {
       return !pr.isDraft && pr.ciStatus === "red";
     }
@@ -575,15 +603,6 @@
       return `${days}d left`;
     }
 
-    function loadCache() {
-      try {
-        const raw = localStorage.getItem(PR_CACHE_KEY);
-        return raw ? JSON.parse(raw) : null;
-      } catch {
-        return null;
-      }
-    }
-
     function loadPinnedRepos() {
       try {
         const repos = JSON.parse(localStorage.getItem(PINNED_REPOS_KEY));
@@ -602,12 +621,6 @@
       } catch {}
       render();
       app.querySelector(`[data-group-key="${groupKey}"] .pin-btn`)?.focus({ preventScroll: true });
-    }
-
-    function saveCache() {
-      try {
-        localStorage.setItem(PR_CACHE_KEY, JSON.stringify({ prs: allPRs, sleep: sleepData, at: lastRefreshed }));
-      } catch {}
     }
 
     function updateLastRefresh() {
@@ -632,52 +645,64 @@
       // a newer one when a manual and automatic refresh happen together.
       if (refreshing) return;
 
-      // Seed from cache so a refresh renders instantly while we fetch fresh data.
-      if (allPRs.length === 0) {
-        const cache = loadCache();
-        if (cache && Array.isArray(cache.prs) && cache.prs.length) {
-          allPRs = cache.prs;
-          sleepData = cache.sleep || {};
-          lastRefreshed = cache.at || null;
-        }
-      }
-
       refreshing = true;
-      if (allPRs.length > 0) {
-        render(); // show cached data with a refreshing spinner on top
+      refreshError = false;
+      if (hasSnapshot) {
+        render();
       } else {
         app.innerHTML = '<div class="loading"><div class="spinner"></div><div>Fetching PRs...</div></div>';
       }
 
+      // Every device starts with the latest successful server snapshot.
+      // An empty PR list is also a valid snapshot to keep if refresh fails.
       try {
-        const [prRes, sleepRes, pingRes] = await Promise.all([
+        const cacheRes = await fetch("/api/prs/cache", { cache: "no-store" });
+        const cache = cacheRes.ok ? await cacheRes.json() : null;
+        if (cache && Array.isArray(cache.prs)) {
+          allPRs = cache.prs;
+          hasSnapshot = true;
+          sleepData = cache.sleep || {};
+          lastRefreshed = cache.at || null;
+          pingAuthError = !!cache.authError;
+          selected.clear();
+          updateActionBar();
+          render();
+        }
+      } catch {
+        // A missing or unavailable snapshot must not prevent a fresh fetch.
+      }
+
+      try {
+        const [prRes, freshSleep, pingStatus] = await Promise.all([
           fetch("/api/prs", { cache: "no-store" }),
-          fetch("/api/sleep", { cache: "no-store" }),
-          fetch("/api/ping-status", { cache: "no-store" }).catch(() => null),
+          fetch("/api/sleep", { cache: "no-store" })
+            .then(res => res.ok ? res.json() : null).catch(() => null),
+          fetch("/api/ping-status", { cache: "no-store" })
+            .then(res => res.ok ? res.json() : null).catch(() => null),
         ]);
         if (!prRes.ok) throw new Error("Failed to fetch PRs");
-        allPRs = await prRes.json();
-        if (sleepRes.ok) sleepData = await sleepRes.json();
-        if (pingRes && pingRes.ok) {
-          try { pingAuthError = !!(await pingRes.json()).authError; } catch {}
-        }
-        lastRefreshed = Date.now();
+        const prs = await prRes.json();
+        if (!Array.isArray(prs)) throw new Error("Invalid PR response");
+        allPRs = prs;
+        hasSnapshot = true;
+        if (freshSleep) sleepData = freshSleep;
+        if (pingStatus) pingAuthError = !!pingStatus.authError;
+        const updatedAt = Number(prRes.headers.get("X-PRs-Updated-At"));
+        lastRefreshed = Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : null;
         refreshError = false;
-        saveCache();
         selected.clear();
         updateActionBar();
       } catch (e) {
         refreshError = true;
-        if (allPRs.length === 0) {
-          refreshing = false;
-          app.innerHTML = '<div class="error">Failed to load PRs. Is gh authenticated?</div>';
-          return;
-        }
-        // Otherwise keep showing cached data.
+        // Keep the last server snapshot and its original refresh timestamp.
       } finally {
         refreshing = false;
       }
-      render();
+      if (hasSnapshot) {
+        render();
+      } else {
+        app.innerHTML = '<div class="error">Failed to load PRs. Is gh authenticated?</div>';
+      }
     }
 
     async function sleepPRs(keys, days) {
@@ -687,7 +712,6 @@
         body: JSON.stringify({ keys, days }),
       });
       sleepData = await res.json();
-      saveCache();
       selected.clear();
       updateActionBar();
       render();
@@ -696,7 +720,6 @@
     async function wakePR(key) {
       const res = await fetch(`/api/sleep/${encodeURIComponent(key)}`, { method: "DELETE" });
       sleepData = await res.json();
-      saveCache();
       render();
     }
 
@@ -706,7 +729,6 @@
         const res = await fetch(`/api/sleep/${encodeURIComponent(key)}`, { method: "DELETE" });
         sleepData = await res.json();
       }
-      saveCache();
       selected.clear();
       updateActionBar();
       render();
@@ -733,7 +755,13 @@
       return `background: rgba(${r},${g},${b},0.2); color: #${hex}; border-color: rgba(${r},${g},${b},0.4);`;
     }
 
-    function prIcon(isDraft) {
+    function prIcon(isDraft, stackTitle) {
+      if (stackTitle) {
+        return `<svg class="pr-icon ${isDraft ? 'draft' : 'open'}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="${stackTitle}">
+          <title>${stackTitle}</title>
+          <path d="M8 1.5 1.5 5 8 8.5 14.5 5Z M1.5 8 8 11.5 14.5 8 M1.5 11 8 14.5 14.5 11"/>
+        </svg>`;
+      }
       if (isDraft) {
         return `<svg class="pr-icon draft" viewBox="0 0 16 16" fill="currentColor">
           <path d="M3.5 9.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/>
@@ -751,10 +779,26 @@
       return d.innerHTML;
     }
 
+    function signalBadge(label, status, successText, failureText, allowPending = false) {
+      const pending = allowPending && status === "pending";
+      if (!pending && status !== "green" && status !== "red") return "";
+      const resultText = pending ? "in progress" : status === "green" ? successText : failureText;
+      const description = `${label}: ${resultText}`;
+      const icon = pending
+        ? '<circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/>'
+        : `<path d="${status === "green" ? "M3 8l3 3 7-7" : "M4 4l8 8M12 4l-8 8"}"/>`;
+      return `<span class="signal-badge ${status}" role="img" aria-label="${description}" title="${description}">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          ${icon}
+        </svg>${label}${pending ? ' · In progress' : ''}
+      </span>`;
+    }
+
     function updateActionBar() {
       const n = selected.size;
       actionBar.classList.toggle("visible", n > 0);
-      selCount.textContent = `${n} PR${n === 1 ? '' : 's'} selected`;
+      const noun = allPRs.some(pr => pr.stack && selected.has(prKey(pr))) ? 'item' : 'PR';
+      selCount.textContent = `${countLabel(n, noun)} selected`;
     }
 
     function handleCheckboxClick(key, e) {
@@ -821,7 +865,7 @@
                 </svg>
                 ${pinned ? 'Pinned' : 'Pin'}
               </button>
-              <span class="repo-count">${prs.length}</span>
+              <span class="repo-count">${rowSummary(prs)}</span>
             </div>
           </div>
           <ul class="pr-list">
@@ -837,12 +881,14 @@
                 <input type="checkbox" class="pr-checkbox"
                   ${selected.has(key) ? 'checked' : ''}
                   onclick="handleCheckboxClick('${key}', event)">
-                ${prIcon(pr.isDraft)}
+                ${prIcon(pr.isDraft, pr.stack ? stackDescription(pr) : null)}
                 <div class="pr-body">
                   <div class="pr-title-row">
                     <a class="pr-title" href="${pr.url}" target="_blank">${escapeHtml(pr.title)}</a>
                     <span class="pr-number">#${pr.number}</span>
-                    ${ciFailing ? '<span class="ci-fail-badge">&#9888; CI failing</span>' : ''}
+                    ${pr.stack ? `<span class="stack-badge" title="${stackDescription(pr)}">${countLabel(pr.stack.numbers.length, 'PR')}</span>` : ''}
+                    ${signalBadge('Claude review', pr.claudeReviewStatus, 'approved', 'not approved', true)}
+                    ${signalBadge('CI', pr.ciStatus, 'ready to merge', 'blocked')}
                     ${stale ? `<span class="stale-badge">Stale &middot; ${workdaysSinceActivity(pr)} workday${workdaysSinceActivity(pr) === 1 ? '' : 's'}</span>` : ''}
                     ${noReviewers(pr) ? '<span class="no-reviewers-badge">&#128100; No reviewers</span>' : ''}
                     ${pr.isDraft ? '<span class="draft-badge">Draft</span>' : ''}
@@ -944,7 +990,9 @@
       // Stats
       const draftCount = awakePRs.filter(pr => pr.isDraft).length;
       const nonDraftCount = awakePRs.length - draftCount;
-      stats.textContent = `${filtered.length} PRs (${nonDraftCount} active, ${draftCount} draft, ${sleepingPRs.length} sleeping)`;
+      const visibleRows = showSleeping ? [...filtered, ...sleepingPRs] : filtered;
+      const breakdownLabel = allPRs.some(pr => pr.stack) ? 'Items: ' : '';
+      stats.textContent = `${rowSummary(visibleRows)} visible · ${breakdownLabel}${nonDraftCount} active, ${draftCount} draft, ${sleepingPRs.length} sleeping`;
       updateLastRefresh();
 
       let html = '';
@@ -1030,14 +1078,10 @@
 
     fetchPRs();
 
-    // Poll regularly, and refresh when returning from another tab after enough
-    // time to plausibly merge or close a PR there.
+    // Poll regularly and pick up other devices' snapshots when returning.
     setInterval(fetchPRs, AUTO_REFRESH_MS);
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible" &&
-          (!lastRefreshed || Date.now() - lastRefreshed >= 60 * 1000)) {
-        fetchPRs();
-      }
+      if (document.visibilityState === "visible") fetchPRs();
     });
 
     // Keep the "Updated Xm ago" label current between refreshes.

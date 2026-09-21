@@ -3,11 +3,13 @@ const { execFile } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { createPrCache } = require("./pr-cache");
 
 const app = express();
 const PORT = 3000;
 const SLEEP_FILE = path.join(__dirname, "sleep.json");
 const NOTIFIED_FILE = path.join(__dirname, "notified.json");
+const PR_CACHE_FILE = path.join(__dirname, "pr-cache.json");
 
 // Set true when a ping fails because the meta auth token is expired/invalid,
 // so the UI can prompt the user to run `jf auth`. Cleared on a successful ping.
@@ -67,6 +69,73 @@ function filterVerifiedOpen(prs, verifiedRepos, verifiedOpen) {
   });
 }
 
+// ghstack lists the newest PR first and marks the current PR with __->__.
+// Restrict parsing to its generated block so prose references aren't members.
+function ghstackNumbers(body) {
+  if (typeof body !== "string") return [];
+  const lines = body.split(/\r?\n/);
+  const start = lines.findIndex(line => /^Stack from \[ghstack\]\(https:\/\/github\.com\/[^)]+\) \(oldest at bottom\):\s*$/.test(line));
+  if (start === -1) return [];
+  const numbers = [];
+  for (const line of lines.slice(start + 1)) {
+    const entry = line.match(/^\s*\*\s+(?:__->__\s+)?#([1-9]\d*)\s*$/);
+    if (!entry) break;
+    numbers.push(Number(entry[1]));
+  }
+  return [...new Set(numbers.reverse())];
+}
+
+// Collapse overlapping ghstack lists using only PRs still in the dashboard.
+// Closed dependencies must neither represent a stack nor join separate stacks.
+function groupGhstackPrs(prs) {
+  const keyOf = pr => `${pr.repository.nameWithOwner}#${pr.number}`;
+  const byKey = new Map(prs.map(pr => [keyOf(pr), pr]));
+  const parents = new Map(prs.map(pr => [keyOf(pr), keyOf(pr)]));
+  const root = key => {
+    if (parents.get(key) !== key) parents.set(key, root(parents.get(key)));
+    return parents.get(key);
+  };
+  const lists = [];
+  for (const pr of prs) {
+    if (!pr.ghstack?.includes(pr.number)) continue;
+    const keys = pr.ghstack.map(number => `${pr.repository.nameWithOwner}#${number}`).filter(key => byKey.has(key));
+    for (const key of keys) parents.set(root(key), root(keys[0]));
+    lists.push({ keys, updatedAt: pr.updatedAt });
+  }
+
+  // Old descriptions can be truncated or disagree after a restack. Preserve
+  // the newest list's order; older lists only insert members missing from it.
+  // This avoids cycles caused by combining every historical ordering edge.
+  lists.sort((a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0) || b.keys.length - a.keys.length);
+  const orders = new Map();
+  for (const { keys } of lists) {
+    const group = root(keys[0]);
+    if (!orders.has(group)) orders.set(group, []);
+    const order = orders.get(group);
+    for (let i = 0; i < keys.length; i++) {
+      if (order.includes(keys[i])) continue;
+      const previous = keys.slice(0, i).reverse().find(key => order.includes(key));
+      const next = keys.slice(i + 1).find(key => order.includes(key));
+      const position = previous ? order.indexOf(previous) + 1 : next ? order.indexOf(next) : order.length;
+      order.splice(position, 0, keys[i]);
+    }
+  }
+
+  const emitted = new Set();
+  const rows = [];
+  for (const pr of prs) {
+    const group = root(keyOf(pr));
+    if (emitted.has(group)) continue;
+    emitted.add(group);
+    const order = orders.get(group);
+    const representative = order ? byKey.get(order[0]) : pr;
+    const { ghstack, ...row } = representative;
+    if (order) row.stack = { numbers: order.map(key => byKey.get(key).number) };
+    rows.push(row);
+  }
+  return rows;
+}
+
 // GitHub can leave reviewDecision empty even when submitted reviews exist.
 // Keep its decision when present; otherwise use each reviewer's latest verdict.
 function effectiveReviewDecision(pr) {
@@ -87,17 +156,73 @@ function effectiveReviewDecision(pr) {
   return "";
 }
 
-// Parse the Dr. CI (pytorch-bot) comment body into a CI status.
-// Returns "red" when the Dr. CI status header is :x: (failures that need
-// attention), "green" when it's :white_check_mark: (mergeable, even with
-// unrelated/flaky failures), or null when the status can't be determined.
+// Use Dr. CI's headline, not individual job results: unrelated/flaky failures
+// can still be mergeable. GitHub exposes either emoji shortcodes or Unicode.
 function drciStatus(body) {
+  if (typeof body !== "string") return null;
   const start = body.indexOf("<!-- drci-comment-start -->");
-  const end = body.indexOf("<!-- drci-comment-end -->");
-  const section = start !== -1 && end !== -1 ? body.slice(start, end) : body;
-  if (/##\s*:x:/.test(section)) return "red";
-  if (/##\s*:white_check_mark:/.test(section)) return "green";
+  const end = body.indexOf("<!-- drci-comment-end -->", Math.max(0, start));
+  const section = body.slice(Math.max(0, start), end === -1 ? undefined : end);
+  if (/^#{1,6}[ \t]+(?:\:x\:|❌|✗|✘)/m.test(section)) return "red";
+  if (/^#{1,6}[ \t]+(?:\:white_check_mark\:|✅|✓|✔)/m.test(section)) return "green";
   return null;
+}
+
+// Claude posts reviews and progress in issue comments. A recommendation wins
+// over task lists retained in a completed review; an active review is pending.
+function claudeReviewStatus(body) {
+  if (typeof body !== "string") return null;
+  const recommendation = body.match(
+    /^#{1,6}[ \t]+(?:\*\*|__)?Recommendation(?:\*\*|__)?[ \t]*:?[ \t]*([^\r\n]*)\r?\n?([\s\S]*)/im,
+  );
+  if (recommendation) {
+    const verdict = (recommendation[1].trim() || recommendation[2].trim().split(/\r?\n/)[0])
+      .replace(/[*_`]/g, "").trim();
+    if (/^Approve(?:d)?\b/i.test(verdict)) return "green";
+    if (/^(?:Request(?:ed)? Changes|Changes Requested|Needs Discussion)\b/i.test(verdict)) return "red";
+  }
+  if (/^\s*\*\*Claude (?:finished|failed|cancell?ed|encountered an error|hit an error)\b/i.test(body)) return null;
+  const reviewing = /^#{1,6}[ \t]+(?:Re[- ]?)?reviewing\b/im.test(body);
+  const unfinishedTasks = /^[ \t]*[-*][ \t]+\[ \][ \t]+/m.test(body);
+  const jobLink = /\[View job(?: run)?\]\(https:\/\/github\.com\//i.test(body);
+  if (reviewing && (unfinishedTasks || jobLink)) return "pending";
+  return null;
+}
+
+function pytorchStatuses(comments = [], { includePending = true } = {}) {
+  const statuses = { claudeReviewStatus: null, ciStatus: null };
+  // gh returns comments in creation order. The newest review attempt takes
+  // precedence, including a re-review that has not posted its verdict yet.
+  for (const comment of comments) {
+    const author = comment.author?.login?.replace(/\[bot\]$/, "");
+    if (author === "claude") {
+      const status = claudeReviewStatus(comment.body);
+      if (status && (includePending || status !== "pending")) statuses.claudeReviewStatus = status;
+    }
+    if ((author === "pytorch-bot" || author === "pytorchbot") && comment.body?.includes("<!-- drci-comment-start -->")) {
+      statuses.ciStatus = drciStatus(comment.body);
+    }
+  }
+  return statuses;
+}
+
+async function resolvePytorchStatuses(comments, repo, fetchRun = (repo, runId) =>
+  execGh(["api", `repos/${repo}/actions/runs/${runId}`, "--jq", "{status, conclusion}"])) {
+  const statuses = pytorchStatuses(comments);
+  if (statuses.claudeReviewStatus !== "pending") return statuses;
+  const latest = [...comments].reverse().find(comment =>
+    comment.author?.login?.replace(/\[bot\]$/, "") === "claude" && claudeReviewStatus(comment.body) === "pending");
+  const run = latest.body.match(/\[View job(?: run)?\]\(https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/actions\/runs\/(\d+)(?:\/attempts\/\d+)?\)/i);
+  if (!run || run[1].toLowerCase() !== repo.toLowerCase()) return statuses;
+  try {
+    const workflow = await fetchRun(repo, run[2]);
+    // Failed/cancelled jobs can leave a spinner in their comment forever.
+    // Completion alone isn't approval; retain the last actual recommendation.
+    if (workflow.status === "completed") return pytorchStatuses(comments, { includePending: false });
+  } catch {
+    // If GitHub is unavailable, use the progress reported in the comment.
+  }
+  return statuses;
 }
 
 function readNotified() {
@@ -172,96 +297,110 @@ async function notifyBrokenCI(prs) {
   if (changed) writeNotified(notified);
 }
 
+async function fetchPrsFromGitHub() {
+  let prs = await execGh([
+    "search", "prs",
+    "--author=@me", "--state=open", "--limit=200",
+    "--json", "number,title,repository,updatedAt,url,isDraft,state,createdAt,labels",
+  ]);
+
+  // Group PRs by repo to batch-fetch review details.
+  const byRepo = new Map();
+  for (const pr of prs) {
+    const repo = pr.repository.nameWithOwner;
+    if (!byRepo.has(repo)) byRepo.set(repo, []);
+    byRepo.get(repo).push(pr);
+  }
+
+  // Fetch review details per repo in parallel. This list is also the
+  // canonical source of truth for whether each search result is still open.
+  const verifiedRepos = new Set();
+  const verifiedOpen = new Set();
+  await Promise.all([...byRepo.entries()].map(async ([repo, repoPrs]) => {
+    try {
+      const details = await execGh([
+        "pr", "list",
+        "--repo", repo,
+        "--author=@me",
+        "--state=open",
+        "--limit=200",
+        "--json", "number,reviewDecision,reviewRequests,reviews,body,updatedAt",
+      ]);
+      verifiedRepos.add(repo);
+      for (const d of details) verifiedOpen.add(`${repo}#${d.number}`);
+      const detailMap = new Map(details.map(d => [d.number, d]));
+      for (const pr of repoPrs) {
+        const d = detailMap.get(pr.number);
+        pr.ghstack = ghstackNumbers(d?.body);
+        if (d?.updatedAt) pr.updatedAt = d.updatedAt;
+        pr.reviewDecision = effectiveReviewDecision(d);
+        const reqs = d && d.reviewRequests ? d.reviewRequests.length : 0;
+        const revs = d && d.reviews ? d.reviews.length : 0;
+        pr.hasReviewers = reqs > 0 || revs > 0;
+      }
+    } catch {
+      // On failure, assume reviewers exist so we don't falsely nag.
+      for (const pr of repoPrs) {
+        pr.reviewDecision = "";
+        pr.hasReviewers = true;
+      }
+    }
+  }));
+
+  prs = groupGhstackPrs(filterVerifiedOpen(prs, verifiedRepos, verifiedOpen));
+
+  // Claude reviews and Dr. CI mergeability are both published in comments.
+  // Fetch them together for PyTorch PRs, including reviewed drafts.
+  await Promise.all(prs.map(async (pr) => {
+    pr.ciStatus = null;
+    pr.claudeReviewStatus = null;
+    const owner = pr.repository.nameWithOwner.split("/")[0];
+    if (owner !== "pytorch") return;
+    try {
+      const data = await execGh([
+        "pr", "view", String(pr.number),
+        "--repo", pr.repository.nameWithOwner,
+        "--json", "comments",
+      ]);
+      Object.assign(pr, await resolvePytorchStatuses(data.comments || [], pr.repository.nameWithOwner));
+    } catch {
+      // Leave both statuses unknown when comments are unavailable.
+    }
+  }));
+
+  // Auto-wake any PR that has since been approved.
+  const sleep = getActiveSleep();
+  let sleepChanged = false;
+  for (const pr of prs) {
+    if (pr.reviewDecision !== "APPROVED") continue;
+    const key = `${pr.repository.nameWithOwner}#${pr.number}`;
+    if (sleep[key]) {
+      delete sleep[key];
+      sleepChanged = true;
+    }
+  }
+  if (sleepChanged) writeSleep(sleep);
+
+  // Fire-and-forget so a slow/failed ping never blocks the response.
+  notifyBrokenCI(prs).catch(e => console.error("notify error:", e.message));
+
+  return prs;
+}
+
+const prCache = createPrCache({ file: PR_CACHE_FILE, fetchPrs: fetchPrsFromGitHub });
+
+// Reading the shared snapshot is immediate and never waits for GitHub. Sleep
+// and auth state are read now so another device's changes aren't cached away.
+app.get("/api/prs/cache", (req, res) => {
+  const snapshot = prCache.getSnapshot();
+  res.json(snapshot ? { ...snapshot, sleep: getActiveSleep(), authError: pingAuthError } : null);
+});
+
 app.get("/api/prs", async (req, res) => {
   try {
-    let prs = await execGh([
-      "search", "prs",
-      "--author=@me", "--state=open", "--limit=200",
-      "--json", "number,title,repository,updatedAt,url,isDraft,state,createdAt,labels",
-    ]);
-
-    // Group PRs by repo to batch-fetch review details.
-    const byRepo = new Map();
-    for (const pr of prs) {
-      const repo = pr.repository.nameWithOwner;
-      if (!byRepo.has(repo)) byRepo.set(repo, []);
-      byRepo.get(repo).push(pr);
-    }
-
-    // Fetch review details per repo in parallel. This list is also the
-    // canonical source of truth for whether each search result is still open.
-    const verifiedRepos = new Set();
-    const verifiedOpen = new Set();
-    await Promise.all([...byRepo.entries()].map(async ([repo, repoPrs]) => {
-      try {
-        const details = await execGh([
-          "pr", "list",
-          "--repo", repo,
-          "--author=@me",
-          "--state=open",
-          "--limit=200",
-          "--json", "number,reviewDecision,reviewRequests,reviews",
-        ]);
-        verifiedRepos.add(repo);
-        for (const d of details) verifiedOpen.add(`${repo}#${d.number}`);
-        const detailMap = new Map(details.map(d => [d.number, d]));
-        for (const pr of repoPrs) {
-          const d = detailMap.get(pr.number);
-          pr.reviewDecision = effectiveReviewDecision(d);
-          const reqs = d && d.reviewRequests ? d.reviewRequests.length : 0;
-          const revs = d && d.reviews ? d.reviews.length : 0;
-          pr.hasReviewers = reqs > 0 || revs > 0;
-        }
-      } catch {
-        // On failure, assume reviewers exist so we don't falsely nag.
-        for (const pr of repoPrs) {
-          pr.reviewDecision = "";
-          pr.hasReviewers = true;
-        }
-      }
-    }));
-
-    prs = filterVerifiedOpen(prs, verifiedRepos, verifiedOpen);
-
-    // Fetch Dr. CI status for published (non-draft) PyTorch PRs. Dr. CI only
-    // runs in the pytorch org, so skip everything else to avoid wasted calls.
-    await Promise.all(prs.map(async (pr) => {
-      pr.ciStatus = null;
-      const owner = pr.repository.nameWithOwner.split("/")[0];
-      if (pr.isDraft || owner !== "pytorch") return;
-      try {
-        const data = await execGh([
-          "pr", "view", String(pr.number),
-          "--repo", pr.repository.nameWithOwner,
-          "--json", "comments",
-        ]);
-        const comments = data.comments || [];
-        const drci = [...comments].reverse().find(
-          c => c.author && c.author.login === "pytorch-bot" && c.body.includes("drci-comment-start")
-        );
-        if (drci) pr.ciStatus = drciStatus(drci.body);
-      } catch {
-        pr.ciStatus = null;
-      }
-    }));
-
-    // Auto-wake any PR that has since been approved.
-    const sleep = getActiveSleep();
-    let sleepChanged = false;
-    for (const pr of prs) {
-      if (pr.reviewDecision !== "APPROVED") continue;
-      const key = `${pr.repository.nameWithOwner}#${pr.number}`;
-      if (sleep[key]) {
-        delete sleep[key];
-        sleepChanged = true;
-      }
-    }
-    if (sleepChanged) writeSleep(sleep);
-
-    // Fire-and-forget so a slow/failed ping never blocks the response.
-    notifyBrokenCI(prs).catch(e => console.error("notify error:", e.message));
-
-    res.json(prs);
+    const snapshot = await prCache.refresh();
+    res.set("X-PRs-Updated-At", String(snapshot.at));
+    res.json(snapshot.prs);
   } catch (e) {
     console.error("gh error:", e.message);
     res.status(500).json({ error: "Failed to fetch PRs" });
@@ -311,4 +450,7 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, filterVerifiedOpen, effectiveReviewDecision };
+module.exports = {
+  app, filterVerifiedOpen, ghstackNumbers, groupGhstackPrs,
+  effectiveReviewDecision, drciStatus, claudeReviewStatus, pytorchStatuses, resolvePytorchStatuses,
+};
