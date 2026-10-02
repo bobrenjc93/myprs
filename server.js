@@ -390,6 +390,7 @@ const prCache = createPrCache({
   file: PR_CACHE_FILE,
   fetchPrs: fetchPrsFromGitHub,
   minIntervalMs: MIN_REFRESH_MS,
+  fingerprint: () => readRepos().enabled.join(","),
 });
 
 // Reading the shared snapshot is immediate and never waits for GitHub. Sleep
@@ -401,7 +402,7 @@ app.get("/api/prs/cache", (req, res) => {
 
 app.get("/api/prs", async (req, res) => {
   try {
-    const snapshot = await prCache.refresh();
+    const snapshot = await prCache.refresh({ force: req.query.force === "1" });
     res.set("X-PRs-Updated-At", String(snapshot.at));
     res.json(snapshot.prs);
   } catch (e) {

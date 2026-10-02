@@ -708,7 +708,9 @@
       render();
     }
 
-    async function fetchPRs() {
+    // `force` marks a refresh the user asked for, which bypasses the
+    // server's throttle; polling and tab focus must not.
+    async function fetchPRs({ force = false } = {}) {
       // Avoid overlapping requests, which can let an older response overwrite
       // a newer one when a manual and automatic refresh happen together.
       if (refreshing) return;
@@ -742,7 +744,7 @@
 
       try {
         const [prRes, freshSleep, pingStatus] = await Promise.all([
-          fetch("/api/prs", { cache: "no-store" }),
+          fetch(force ? "/api/prs?force=1" : "/api/prs", { cache: "no-store" }),
           fetch("/api/sleep", { cache: "no-store" })
             .then(res => res.ok ? res.json() : null).catch(() => null),
           fetch("/api/ping-status", { cache: "no-store" })
@@ -1126,7 +1128,7 @@
       render();
     });
 
-    refreshBtn.addEventListener("click", fetchPRs);
+    refreshBtn.addEventListener("click", () => fetchPRs({ force: true }));
 
     sleepSelectedBtn.addEventListener("click", () => {
       if (selected.size === 0) return;
@@ -1227,7 +1229,7 @@
         });
         if (!res.ok) throw new Error("Save failed");
         reposOverlay.classList.remove("open");
-        fetchPRs();
+        fetchPRs({ force: true });
       } catch {
         repoStatus.textContent = "Save failed";
       }

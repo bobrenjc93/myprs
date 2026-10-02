@@ -96,7 +96,7 @@ test("devices share the saved snapshot immediately and a single fresh response a
 });
 
 test("a recent snapshot is reused, and changing repositories forces a fresh query", { timeout: 5000 }, async (t) => {
-  const saved = { prs: [{ number: 6, title: "Fetched moments ago" }], at: Date.now() };
+  const saved = { prs: [{ number: 6, title: "Fetched moments ago" }], at: Date.now(), fingerprint: "pytorch/pytorch" };
   const { url, listings } = await startApp(t, saved);
 
   // Extra tabs, devices and tab-focus events must not each cost a GitHub call.
@@ -131,4 +131,40 @@ test("rejecting a repository list keeps the stored settings untouched", async (t
   assert.deepEqual(await (await fetch(`${url}/api/repos`)).json(), {
     enabled: ["pytorch/pytorch"], known: ["pytorch/pytorch"],
   });
+});
+
+test("a snapshot from other repositories is shown but never counts as fresh", { timeout: 5000 }, async (t) => {
+  // What a restart finds after the tracked repositories changed, or after an
+  // older version wrote the file: recent, so the throttle would otherwise
+  // serve it, but describing repos that are no longer tracked.
+  const saved = { prs: [{ number: 6, title: "From a repo we stopped tracking" }], at: Date.now() };
+  const { url, listings } = await startApp(t, saved);
+
+  // Still shown, because it beats a blank dashboard while GitHub is queried.
+  assert.deepEqual((await (await fetch(`${url}/api/prs/cache`)).json()).prs, saved.prs);
+
+  const refreshed = fetch(`${url}/api/prs`);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(listings.length, 1, "the stale snapshot must not satisfy the refresh");
+  listings[0](null, JSON.stringify([]));
+  assert.deepEqual(await (await refreshed).json(), []);
+});
+
+test("an explicit refresh reaches GitHub inside the throttle window", { timeout: 5000 }, async (t) => {
+  const { url, listings } = await startApp(t);
+  const first = fetch(`${url}/api/prs`);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  listings[0](null, JSON.stringify([]));
+  await first;
+
+  // Polling and tab focus reuse the snapshot the refresh just stored...
+  await fetch(`${url}/api/prs`);
+  assert.equal(listings.length, 1);
+
+  // ...but the Refresh button must not silently do nothing.
+  const forced = fetch(`${url}/api/prs?force=1`);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(listings.length, 2);
+  listings[1](null, JSON.stringify([]));
+  assert.equal((await forced).status, 200);
 });

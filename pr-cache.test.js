@@ -12,8 +12,11 @@ function fixture(t) {
   return { dir, file: path.join(dir, "prs.json") };
 }
 
+// The persisted settings fingerprint is covered by the server tests; these
+// assertions are about the snapshot itself.
 function readSnapshot(file) {
-  return JSON.parse(fs.readFileSync(file, "utf8"));
+  const { fingerprint, ...snapshot } = JSON.parse(fs.readFileSync(file, "utf8"));
+  return snapshot;
 }
 
 test("a missing cache starts empty without fetching or writing", (t) => {

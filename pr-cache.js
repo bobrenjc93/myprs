@@ -5,7 +5,14 @@ const fs = require("fs");
 // `minIntervalMs` additionally caps how often GitHub is contacted: refreshes
 // requested inside that window reuse the snapshot, so extra tabs, devices and
 // tab-focus events cost nothing instead of multiplying the API calls.
-function createPrCache({ file, fetchPrs, now = Date.now, onError = console.error, minIntervalMs = 0 }) {
+// `fingerprint` describes the settings a snapshot was produced under. A
+// snapshot recorded under different settings is wrong rather than merely
+// stale, so it is still shown — beating a blank dashboard — but never counts
+// as fresh, which also discards snapshots written by an older version.
+function createPrCache({
+  file, fetchPrs, now = Date.now, onError = console.error,
+  minIntervalMs = 0, fingerprint = () => "",
+}) {
   let snapshot = null;
   let inFlight = null;
   let freshUntil = 0;
@@ -14,14 +21,16 @@ function createPrCache({ file, fetchPrs, now = Date.now, onError = console.error
     if (Array.isArray(saved?.prs) && Number.isFinite(saved.at) && saved.at > 0) {
       snapshot = { prs: saved.prs, at: saved.at };
       // A restart must not re-query GitHub for a snapshot that is still fresh.
-      freshUntil = snapshot.at + minIntervalMs;
+      if (saved.fingerprint === fingerprint()) freshUntil = snapshot.at + minIntervalMs;
     }
   } catch {
     // The first visit still works when no cache exists or a file is corrupt.
   }
 
-  function refresh() {
-    if (snapshot && now() < freshUntil) return Promise.resolve(snapshot);
+  // `force` is for a refresh the user actually asked for, which must reach
+  // GitHub even inside the throttle window.
+  function refresh({ force = false } = {}) {
+    if (!force && snapshot && now() < freshUntil) return Promise.resolve(snapshot);
     if (!inFlight) {
       inFlight = Promise.resolve().then(fetchPrs).then(prs => {
         if (!Array.isArray(prs)) throw new TypeError("Expected a PR array");
@@ -30,7 +39,7 @@ function createPrCache({ file, fetchPrs, now = Date.now, onError = console.error
         try {
           // Rename only after a complete write so a restart cannot read half
           // of a snapshot. Keep serving fresh data if persistence fails.
-          fs.writeFileSync(`${file}.tmp`, JSON.stringify(snapshot));
+          fs.writeFileSync(`${file}.tmp`, JSON.stringify({ ...snapshot, fingerprint: fingerprint() }));
           fs.renameSync(`${file}.tmp`, file);
         } catch (error) {
           onError("PR cache could not be saved:", error.message);
