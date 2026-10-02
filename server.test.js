@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const { once } = require("node:events");
 
 const {
-  app, effectiveReviewDecision, filterVerifiedOpen,
+  app, effectiveReviewDecision,
   drciStatus, claudeReviewStatus, pytorchStatuses, resolvePytorchStatuses,
   ghstackNumbers, groupGhstackPrs,
 } = require("./server");
@@ -473,24 +473,6 @@ test("has no decision without a decisive review from an identified author", () =
   ]]) {
     assert.equal(effectiveReviewDecision({ reviews }), "");
   }
-});
-
-test("removes stale search results from successfully verified repositories", () => {
-  const prs = [pr("owner/verified", 1), pr("owner/verified", 2)];
-  const result = filterVerifiedOpen(
-    prs,
-    new Set(["owner/verified"]),
-    new Set(["owner/verified#2"]),
-  );
-
-  assert.deepEqual(result, [prs[1]]);
-});
-
-test("keeps search results when repository verification failed", () => {
-  const prs = [pr("owner/unverified", 1)];
-  const result = filterVerifiedOpen(prs, new Set(), new Set());
-
-  assert.deepEqual(result, prs);
 });
 
 test("API responses cannot be served from an HTTP cache", async (t) => {

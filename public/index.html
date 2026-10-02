@@ -49,6 +49,55 @@
 
     .btn:hover { background: #30363d; }
     .btn.active { background: #1f6feb; border-color: #1f6feb; }
+    .btn:disabled { opacity: 0.5; cursor: default; }
+
+    .overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(1, 4, 9, 0.7);
+      z-index: 20;
+      padding: 24px;
+      overflow-y: auto;
+    }
+
+    .overlay.open { display: flex; align-items: flex-start; justify-content: center; }
+
+    .sheet {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 20px;
+      width: 100%;
+      max-width: 460px;
+      margin-top: 48px;
+    }
+
+    .sheet h2 { font-size: 16px; margin-bottom: 8px; }
+    .sheet-note { color: #8b949e; font-size: 12px; line-height: 1.5; margin-bottom: 14px; }
+
+    .repo-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 0;
+      border-top: 1px solid #21262d;
+      font-size: 13px;
+    }
+
+    .repo-row input { cursor: pointer; }
+    .repo-empty { color: #8b949e; font-size: 13px; padding: 10px 0; }
+
+    .sheet-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid #30363d;
+    }
+
+    .sheet-actions .stats { margin-left: auto; }
 
     .stats { font-size: 13px; color: #8b949e; }
 
@@ -492,6 +541,7 @@
       <button class="btn" id="sortBtn" title="Toggle sort order">Newest first</button>
       <button class="btn active" id="draftToggle">Drafts</button>
       <button class="btn" id="sleepToggle">Sleeping</button>
+      <button class="btn" id="reposBtn" title="Choose which repositories to track">Repos</button>
       <button class="btn" id="refreshBtn">Refresh</button>
     </div>
   </header>
@@ -506,6 +556,23 @@
     <button class="sleep-btn" id="sleepSelectedBtn">Sleep 1 week</button>
     <button class="wake-sel-btn" id="wakeSelectedBtn">Wake</button>
     <button class="clear-btn" id="clearSelBtn">Clear</button>
+  </div>
+
+  <div class="overlay" id="reposOverlay">
+    <div class="sheet">
+      <h2>Tracked repositories</h2>
+      <p class="sheet-note">
+        Each enabled repository is queried on every refresh. Keeping the list short
+        is what keeps the dashboard under GitHub's rate limits.
+      </p>
+      <div id="repoList"></div>
+      <div class="sheet-actions">
+        <button class="btn" id="discoverReposBtn" title="Search GitHub for repositories you have open PRs in">Find repos</button>
+        <span class="stats" id="repoStatus"></span>
+        <button class="btn" id="cancelReposBtn">Cancel</button>
+        <button class="btn active" id="saveReposBtn">Save</button>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -1075,6 +1142,95 @@
       selected.clear();
       updateActionBar();
       updateCheckboxes();
+    });
+
+    // Repository settings. The draft lives here so toggles survive a "Find
+    // repos" round trip and are only persisted when the user saves.
+    const reposOverlay = document.getElementById("reposOverlay");
+    const repoList = document.getElementById("repoList");
+    const repoStatus = document.getElementById("repoStatus");
+    const discoverReposBtn = document.getElementById("discoverReposBtn");
+    let repoDraft = new Set();
+    let repoKnown = [];
+
+    function renderRepos() {
+      if (repoKnown.length === 0) {
+        repoList.innerHTML = '<div class="repo-empty">No repositories yet — use "Find repos".</div>';
+        return;
+      }
+      repoList.innerHTML = repoKnown.map((repo, i) => `
+        <label class="repo-row">
+          <input type="checkbox" data-i="${i}"${repoDraft.has(repo) ? " checked" : ""}>
+          <span>${escapeHtml(repo)}</span>
+        </label>`).join("");
+      repoList.querySelectorAll("input").forEach(input => {
+        input.addEventListener("change", () => {
+          const repo = repoKnown[Number(input.dataset.i)];
+          if (input.checked) repoDraft.add(repo);
+          else repoDraft.delete(repo);
+        });
+      });
+    }
+
+    function applyRepos(repos) {
+      repoKnown = repos.known || [];
+      repoDraft = new Set(repos.enabled || []);
+      renderRepos();
+    }
+
+    async function openRepos() {
+      repoStatus.textContent = "";
+      reposOverlay.classList.add("open");
+      repoList.innerHTML = '<div class="repo-empty">Loading…</div>';
+      try {
+        const res = await fetch("/api/repos", { cache: "no-store" });
+        if (!res.ok) throw new Error("Failed to load repositories");
+        applyRepos(await res.json());
+      } catch {
+        repoList.innerHTML = '<div class="repo-empty">Could not load repositories.</div>';
+      }
+    }
+
+    document.getElementById("reposBtn").addEventListener("click", openRepos);
+    document.getElementById("cancelReposBtn").addEventListener("click", () => {
+      reposOverlay.classList.remove("open");
+    });
+    reposOverlay.addEventListener("click", (e) => {
+      if (e.target === reposOverlay) reposOverlay.classList.remove("open");
+    });
+
+    discoverReposBtn.addEventListener("click", async () => {
+      discoverReposBtn.disabled = true;
+      repoStatus.textContent = "Searching…";
+      try {
+        const res = await fetch("/api/repos/discover", { method: "POST" });
+        if (!res.ok) throw new Error("Discovery failed");
+        const repos = await res.json();
+        const before = repoKnown.length;
+        repoKnown = repos.known || [];
+        renderRepos();
+        repoStatus.textContent = `Found ${repoKnown.length - before} new`;
+      } catch {
+        repoStatus.textContent = "Search failed (rate limited?)";
+      } finally {
+        discoverReposBtn.disabled = false;
+      }
+    });
+
+    document.getElementById("saveReposBtn").addEventListener("click", async () => {
+      repoStatus.textContent = "Saving…";
+      try {
+        const res = await fetch("/api/repos", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: [...repoDraft] }),
+        });
+        if (!res.ok) throw new Error("Save failed");
+        reposOverlay.classList.remove("open");
+        fetchPRs();
+      } catch {
+        repoStatus.textContent = "Save failed";
+      }
     });
 
     fetchPRs();

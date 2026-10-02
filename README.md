@@ -5,7 +5,9 @@ A personal dashboard for viewing all your open GitHub pull requests in one place
 ## Features
 
 - Groups PRs by repository
+- Tracks an explicit list of repositories, chosen with the Repos button and saved in `repos.json`; "Find repos" searches GitHub for repositories you have open PRs in
 - Loads the latest shared server snapshot on every device, then refreshes from GitHub; the cache persists in `pr-cache.json` across server restarts
+- Refreshes GitHub at most once a minute, so extra tabs, devices, and tab switches cost no API calls
 - Shows check/cross badges for PyTorch Claude reviews and CI merge signals, with an in-progress indicator while Claude reviews again
 - Collapses ghstack PRs into one row with a stack icon and PR count; the bottom open PR supplies the title, status, and actions
 - Pin repositories to the top with the Pin button in each repo header; pins are saved in your browser
@@ -32,4 +34,7 @@ npm install
 npm start
 ```
 
-Then open http://localhost:3000.
+Then open http://localhost:3000. Set `PORT` to listen elsewhere.
+
+Only `pytorch/pytorch` is tracked by default. Use the Repos button to add more —
+each enabled repository costs one GitHub query per refresh.

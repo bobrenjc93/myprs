@@ -6,10 +6,19 @@ const path = require("path");
 const { createPrCache } = require("./pr-cache");
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const SLEEP_FILE = path.join(__dirname, "sleep.json");
 const NOTIFIED_FILE = path.join(__dirname, "notified.json");
 const PR_CACHE_FILE = path.join(__dirname, "pr-cache.json");
+const REPOS_FILE = path.join(__dirname, "repos.json");
+
+// Every enabled repository costs API calls on each refresh, so the dashboard
+// tracks an explicit opt-in list rather than everything the account authors.
+const DEFAULT_REPOS = ["pytorch/pytorch"];
+
+// Only refresh GitHub once a minute no matter how many devices, tabs or
+// tab-focus events ask for a refresh in that window.
+const MIN_REFRESH_MS = 60 * 1000;
 
 // Set true when a ping fails because the meta auth token is expired/invalid,
 // so the UI can prompt the user to run `jf auth`. Cleared on a successful ping.
@@ -49,6 +58,26 @@ function getActiveSleep() {
   return sleep;
 }
 
+const uniqueSorted = (names) => [...new Set(names.filter(name => typeof name === "string" && name))].sort();
+
+// An enabled repository is always offered in the settings list, so a repo that
+// is tracked but currently has no open PRs can still be switched back off.
+function readRepos() {
+  let saved = {};
+  try {
+    saved = JSON.parse(fs.readFileSync(REPOS_FILE, "utf8")) || {};
+  } catch {
+    // Fall back to the defaults when the file is missing or corrupt.
+  }
+  const enabled = uniqueSorted(Array.isArray(saved.enabled) ? saved.enabled : DEFAULT_REPOS);
+  const known = uniqueSorted([...(Array.isArray(saved.known) ? saved.known : []), ...enabled]);
+  return { enabled, known };
+}
+
+function writeRepos(repos) {
+  fs.writeFileSync(REPOS_FILE, JSON.stringify(repos, null, 2));
+}
+
 function execGh(args) {
   return new Promise((resolve, reject) => {
     execFile("gh", args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
@@ -56,16 +85,6 @@ function execGh(args) {
       try { resolve(JSON.parse(stdout)); }
       catch (e) { reject(e); }
     });
-  });
-}
-
-// GitHub's search index can briefly return PRs that were just merged or
-// closed. Only prune results for repositories whose canonical open-PR query
-// succeeded; a failed verification must not make an entire repo disappear.
-function filterVerifiedOpen(prs, verifiedRepos, verifiedOpen) {
-  return prs.filter((pr) => {
-    const repo = pr.repository.nameWithOwner;
-    return !verifiedRepos.has(repo) || verifiedOpen.has(`${repo}#${pr.number}`);
   });
 }
 
@@ -297,57 +316,37 @@ async function notifyBrokenCI(prs) {
   if (changed) writeNotified(notified);
 }
 
+// One `gh pr list` per enabled repository is the whole dashboard query. It is
+// also the canonical list of open PRs, so nothing has to be verified or pruned
+// afterwards. The account-wide `gh search prs` this replaces capped out at 200
+// results, which silently dropped PRs — and with them the bottom of a stack —
+// once the account had more open PRs than that. Search is also governed by a
+// far tighter secondary rate limit than the rest of the API.
 async function fetchPrsFromGitHub() {
-  let prs = await execGh([
-    "search", "prs",
-    "--author=@me", "--state=open", "--limit=200",
-    "--json", "number,title,repository,updatedAt,url,isDraft,state,createdAt,labels",
-  ]);
+  const { enabled } = readRepos();
 
-  // Group PRs by repo to batch-fetch review details.
-  const byRepo = new Map();
-  for (const pr of prs) {
-    const repo = pr.repository.nameWithOwner;
-    if (!byRepo.has(repo)) byRepo.set(repo, []);
-    byRepo.get(repo).push(pr);
-  }
-
-  // Fetch review details per repo in parallel. This list is also the
-  // canonical source of truth for whether each search result is still open.
-  const verifiedRepos = new Set();
-  const verifiedOpen = new Set();
-  await Promise.all([...byRepo.entries()].map(async ([repo, repoPrs]) => {
-    try {
-      const details = await execGh([
-        "pr", "list",
-        "--repo", repo,
-        "--author=@me",
-        "--state=open",
-        "--limit=200",
-        "--json", "number,reviewDecision,reviewRequests,reviews,body,updatedAt",
-      ]);
-      verifiedRepos.add(repo);
-      for (const d of details) verifiedOpen.add(`${repo}#${d.number}`);
-      const detailMap = new Map(details.map(d => [d.number, d]));
-      for (const pr of repoPrs) {
-        const d = detailMap.get(pr.number);
-        pr.ghstack = ghstackNumbers(d?.body);
-        if (d?.updatedAt) pr.updatedAt = d.updatedAt;
-        pr.reviewDecision = effectiveReviewDecision(d);
-        const reqs = d && d.reviewRequests ? d.reviewRequests.length : 0;
-        const revs = d && d.reviews ? d.reviews.length : 0;
-        pr.hasReviewers = reqs > 0 || revs > 0;
-      }
-    } catch {
-      // On failure, assume reviewers exist so we don't falsely nag.
-      for (const pr of repoPrs) {
-        pr.reviewDecision = "";
-        pr.hasReviewers = true;
-      }
-    }
+  const perRepo = await Promise.all(enabled.map(async (repo) => {
+    const rows = await execGh([
+      "pr", "list",
+      "--repo", repo,
+      "--author=@me",
+      "--state=open",
+      "--limit=200",
+      "--json", "number,title,url,state,isDraft,createdAt,updatedAt,labels,reviewDecision,reviewRequests,reviews,body",
+    ]);
+    return rows.map(({ body, reviews, reviewRequests, ...pr }) => ({
+      ...pr,
+      repository: { nameWithOwner: repo },
+      ghstack: ghstackNumbers(body),
+      reviewDecision: effectiveReviewDecision({ reviewDecision: pr.reviewDecision, reviews }),
+      hasReviewers: (reviewRequests?.length || 0) > 0 || (reviews?.length || 0) > 0,
+    }));
   }));
 
-  prs = groupGhstackPrs(filterVerifiedOpen(prs, verifiedRepos, verifiedOpen));
+  // A repo that fails to load would otherwise look like a repo with no open
+  // PRs. Failing the whole refresh keeps the last good snapshot on screen
+  // instead of silently showing an incomplete dashboard.
+  let prs = groupGhstackPrs(perRepo.flat());
 
   // Claude reviews and Dr. CI mergeability are both published in comments.
   // Fetch them together for PyTorch PRs, including reviewed drafts.
@@ -387,7 +386,11 @@ async function fetchPrsFromGitHub() {
   return prs;
 }
 
-const prCache = createPrCache({ file: PR_CACHE_FILE, fetchPrs: fetchPrsFromGitHub });
+const prCache = createPrCache({
+  file: PR_CACHE_FILE,
+  fetchPrs: fetchPrsFromGitHub,
+  minIntervalMs: MIN_REFRESH_MS,
+});
 
 // Reading the shared snapshot is immediate and never waits for GitHub. Sleep
 // and auth state are read now so another device's changes aren't cached away.
@@ -404,6 +407,42 @@ app.get("/api/prs", async (req, res) => {
   } catch (e) {
     console.error("gh error:", e.message);
     res.status(500).json({ error: "Failed to fetch PRs" });
+  }
+});
+
+app.get("/api/repos", (req, res) => {
+  res.json(readRepos());
+});
+
+app.put("/api/repos", (req, res) => {
+  const { enabled } = req.body;
+  if (!Array.isArray(enabled) || enabled.some(repo => typeof repo !== "string")) {
+    return res.status(400).json({ error: "enabled (array of strings) required" });
+  }
+  const current = readRepos();
+  const repos = { enabled: uniqueSorted(enabled), known: uniqueSorted([...current.known, ...enabled]) };
+  writeRepos(repos);
+  prCache.invalidate();
+  res.json(repos);
+});
+
+// Discovery is the one place that still pays for the account-wide search, so
+// it runs only when the settings panel asks rather than on every refresh.
+app.post("/api/repos/discover", async (req, res) => {
+  try {
+    const found = await execGh([
+      "search", "prs", "--author=@me", "--state=open", "--limit=200", "--json", "repository",
+    ]);
+    const current = readRepos();
+    const repos = {
+      enabled: current.enabled,
+      known: uniqueSorted([...current.known, ...found.map(pr => pr?.repository?.nameWithOwner)]),
+    };
+    writeRepos(repos);
+    res.json(repos);
+  } catch (e) {
+    console.error("gh error:", e.message);
+    res.status(502).json({ error: "Failed to discover repositories" });
   }
 });
 
@@ -451,6 +490,6 @@ if (require.main === module) {
 }
 
 module.exports = {
-  app, filterVerifiedOpen, ghstackNumbers, groupGhstackPrs,
+  app, ghstackNumbers, groupGhstackPrs, readRepos,
   effectiveReviewDecision, drciStatus, claudeReviewStatus, pytorchStatuses, resolvePytorchStatuses,
 };
