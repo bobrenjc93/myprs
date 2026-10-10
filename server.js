@@ -16,9 +16,14 @@ const REPOS_FILE = path.join(__dirname, "repos.json");
 // tracks an explicit opt-in list rather than everything the account authors.
 const DEFAULT_REPOS = ["pytorch/pytorch"];
 
-// Only refresh GitHub once a minute no matter how many devices, tabs or
-// tab-focus events ask for a refresh in that window.
-const MIN_REFRESH_MS = 60 * 1000;
+// GitHub is only contacted when someone clicks Refresh, and at most once an
+// hour across every device. The GraphQL budget is shared with every other tool
+// on the account. Only changing which repos are tracked skips the wait.
+const MIN_REFRESH_MS = 60 * 60 * 1000;
+
+// A failed refresh shouldn't cost the whole hour, but retries still back off.
+const RETRY_BASE_MS = 60 * 1000;
+const MAX_RETRY_MS = 15 * 60 * 1000;
 
 // Set true when a ping fails because the meta auth token is expired/invalid,
 // so the UI can prompt the user to run `jf auth`. Cleared on a successful ping.
@@ -390,6 +395,8 @@ const prCache = createPrCache({
   file: PR_CACHE_FILE,
   fetchPrs: fetchPrsFromGitHub,
   minIntervalMs: MIN_REFRESH_MS,
+  retryBaseMs: RETRY_BASE_MS,
+  maxRetryMs: MAX_RETRY_MS,
   fingerprint: () => readRepos().enabled.join(","),
 });
 
@@ -397,16 +404,22 @@ const prCache = createPrCache({
 // and auth state are read now so another device's changes aren't cached away.
 app.get("/api/prs/cache", (req, res) => {
   const snapshot = prCache.getSnapshot();
-  res.json(snapshot ? { ...snapshot, sleep: getActiveSleep(), authError: pingAuthError } : null);
+  res.json(snapshot ? {
+    ...snapshot, nextRefreshAt: prCache.nextRefreshAt(), sleep: getActiveSleep(), authError: pingAuthError,
+  } : null);
 });
 
-app.get("/api/prs", async (req, res) => {
+// Refreshing is a POST so that loading or reloading the page can never reach
+// GitHub; only the Refresh button (or saving repo settings) does.
+app.post("/api/prs", async (req, res) => {
   try {
-    const snapshot = await prCache.refresh({ force: req.query.force === "1" });
+    const snapshot = await prCache.refresh();
     res.set("X-PRs-Updated-At", String(snapshot.at));
+    res.set("X-PRs-Next-Refresh-At", String(prCache.nextRefreshAt()));
     res.json(snapshot.prs);
   } catch (e) {
     console.error("gh error:", e.message);
+    res.set("X-PRs-Next-Refresh-At", String(prCache.nextRefreshAt()));
     res.status(500).json({ error: "Failed to fetch PRs" });
   }
 });

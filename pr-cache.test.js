@@ -171,3 +171,98 @@ test("persistence failure reports an error while fresh data remains shared in me
   assert.equal(errors.length, 1);
   assert.ok(fs.statSync(file).isDirectory());
 });
+
+test("failures back off exponentially without contacting GitHub, and success resets the delay", async (t) => {
+  const { file } = fixture(t);
+  let time = 1000;
+  let fetches = 0;
+  let failing = true;
+  const cache = createPrCache({
+    file, now: () => time, retryBaseMs: 100, maxRetryMs: 300,
+    fetchPrs: async () => {
+      fetches++;
+      if (failing) throw new Error("API rate limit already exceeded");
+      return [];
+    },
+  });
+
+  await assert.rejects(cache.refresh(), /rate limit/);
+  // Polling inside the backoff window reports the failure without fetching.
+  time = 1099;
+  await assert.rejects(cache.refresh(), /Not retrying GitHub until .* rate limit/);
+  assert.equal(fetches, 1);
+
+  // Each further failure doubles the wait, up to the cap.
+  time = 1100;
+  await assert.rejects(cache.refresh(), /rate limit/);
+  time = 1299;
+  await assert.rejects(cache.refresh(), /Not retrying/);
+  time = 1300;
+  await assert.rejects(cache.refresh(), /rate limit/);
+  time = 1599;
+  await assert.rejects(cache.refresh(), /Not retrying/);
+  time = 1600;
+  await assert.rejects(cache.refresh(), /rate limit/);
+  time = 1899;
+  await assert.rejects(cache.refresh(), /Not retrying/);
+  assert.equal(fetches, 4);
+
+  // Success resets the delay.
+  failing = false;
+  time = 1900;
+  assert.deepEqual(await cache.refresh(), { prs: [], at: 1900 });
+  failing = true;
+  time = 2000;
+  await assert.rejects(cache.refresh(), /rate limit/);
+  time = 2099;
+  await assert.rejects(cache.refresh(), /Not retrying/);
+  time = 2100;
+  await assert.rejects(cache.refresh(), /rate limit/);
+  assert.equal(fetches, 7);
+});
+
+test("changing settings retries immediately despite a failure backoff", async (t) => {
+  const { file } = fixture(t);
+  let fetches = 0;
+  const cache = createPrCache({
+    file, now: () => 0, retryBaseMs: 100,
+    fetchPrs: async () => { if (++fetches === 1) throw new Error("Not found"); return []; },
+  });
+
+  await assert.rejects(cache.refresh(), /Not found/);
+  cache.invalidate();
+  assert.deepEqual(await cache.refresh(), { prs: [], at: 0 });
+  assert.equal(fetches, 2);
+});
+
+test("invalid fetched data also backs off", async (t) => {
+  const { file } = fixture(t);
+  let fetches = 0;
+  const cache = createPrCache({
+    file, now: () => 0, retryBaseMs: 100, fetchPrs: async () => { fetches++; return null; },
+  });
+
+  await assert.rejects(cache.refresh(), TypeError);
+  await assert.rejects(cache.refresh(), /Not retrying/);
+  assert.equal(fetches, 1);
+});
+
+test("nextRefreshAt reports when GitHub will next be contacted", async (t) => {
+  const { file } = fixture(t);
+  let time = 1000;
+  let failing = false;
+  const cache = createPrCache({
+    file, now: () => time, minIntervalMs: 500, retryBaseMs: 100,
+    fetchPrs: async () => { if (failing) throw new Error("down"); return []; },
+  });
+
+  assert.equal(cache.nextRefreshAt(), 0);
+  await cache.refresh();
+  assert.equal(cache.nextRefreshAt(), 1500);
+  time = 1500;
+  failing = true;
+  await assert.rejects(cache.refresh(), /down/);
+  assert.equal(cache.nextRefreshAt(), 1600);
+  cache.invalidate();
+  assert.equal(cache.nextRefreshAt(), 0);
+});

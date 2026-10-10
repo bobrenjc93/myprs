@@ -548,7 +548,7 @@
   <main id="app">
     <div class="loading">
       <div class="spinner"></div>
-      <div>Fetching PRs...</div>
+      <div>Loading PRs...</div>
     </div>
   </main>
   <div class="action-bar" id="actionBar">
@@ -577,7 +577,6 @@
 
   <script>
     const PINNED_REPOS_KEY = "myprs_pinned_repos_v1";
-    const AUTO_REFRESH_MS = 5 * 60 * 1000;
     const pinnedRepos = loadPinnedRepos();
     const collapsedGroups = new Set();
 
@@ -587,6 +586,7 @@
     let refreshing = false;
     let refreshError = false;
     let lastRefreshed = null;
+    let nextRefreshAt = 0;
     let pingAuthError = false;
     let showDrafts = true;
     let showSleeping = false;
@@ -693,6 +693,16 @@
 
     function updateLastRefresh() {
       lastRefreshEl.textContent = lastRefreshed ? `Updated ${timeAgo(lastRefreshed)}` : "";
+      const waiting = Date.now() < nextRefreshAt;
+      refreshBtn.disabled = refreshing || waiting;
+      refreshBtn.title = waiting
+        ? `GitHub is refreshed at most once an hour. Next refresh at ${new Date(nextRefreshAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`
+        : "Fetch the latest PRs from GitHub";
+    }
+
+    function readNextRefreshAt(value) {
+      const at = Number(value);
+      return Number.isFinite(at) && at > 0 ? at : 0;
     }
 
     async function verifyToken() {
@@ -708,11 +718,44 @@
       render();
     }
 
-    // `force` marks a refresh the user asked for, which bypasses the
-    // server's throttle; polling and tab focus must not.
-    async function fetchPRs({ force = false } = {}) {
+    // Show the server's shared snapshot without contacting GitHub. Loading the
+    // page never refreshes; only the Refresh button does.
+    async function loadSnapshot() {
+      try {
+        const res = await fetch("/api/prs/cache", { cache: "no-store" });
+        const cache = res.ok ? await res.json() : null;
+        if (cache && Array.isArray(cache.prs)) {
+          allPRs = cache.prs;
+          hasSnapshot = true;
+          sleepData = cache.sleep || {};
+          lastRefreshed = cache.at || null;
+          nextRefreshAt = readNextRefreshAt(cache.nextRefreshAt);
+          pingAuthError = !!cache.authError;
+          selected.clear();
+          updateActionBar();
+        }
+      } catch {
+        refreshError = true;
+      }
+      showSnapshot();
+    }
+
+    function showSnapshot() {
+      if (hasSnapshot) {
+        render();
+      } else {
+        updateLastRefresh();
+        app.innerHTML = refreshError
+          ? '<div class="error">Failed to load PRs. Is gh authenticated?</div>'
+          : '<div class="loading">No PRs loaded yet. Click Refresh to fetch them from GitHub.</div>';
+      }
+    }
+
+    // The server contacts GitHub at most once an hour; inside that window it
+    // returns the shared snapshot, and the button stays disabled.
+    async function refreshPRs() {
       // Avoid overlapping requests, which can let an older response overwrite
-      // a newer one when a manual and automatic refresh happen together.
+      // a newer one.
       if (refreshing) return;
 
       refreshing = true;
@@ -720,36 +763,19 @@
       if (hasSnapshot) {
         render();
       } else {
+        updateLastRefresh();
         app.innerHTML = '<div class="loading"><div class="spinner"></div><div>Fetching PRs...</div></div>';
-      }
-
-      // Every device starts with the latest successful server snapshot.
-      // An empty PR list is also a valid snapshot to keep if refresh fails.
-      try {
-        const cacheRes = await fetch("/api/prs/cache", { cache: "no-store" });
-        const cache = cacheRes.ok ? await cacheRes.json() : null;
-        if (cache && Array.isArray(cache.prs)) {
-          allPRs = cache.prs;
-          hasSnapshot = true;
-          sleepData = cache.sleep || {};
-          lastRefreshed = cache.at || null;
-          pingAuthError = !!cache.authError;
-          selected.clear();
-          updateActionBar();
-          render();
-        }
-      } catch {
-        // A missing or unavailable snapshot must not prevent a fresh fetch.
       }
 
       try {
         const [prRes, freshSleep, pingStatus] = await Promise.all([
-          fetch(force ? "/api/prs?force=1" : "/api/prs", { cache: "no-store" }),
+          fetch("/api/prs", { method: "POST", cache: "no-store" }),
           fetch("/api/sleep", { cache: "no-store" })
             .then(res => res.ok ? res.json() : null).catch(() => null),
           fetch("/api/ping-status", { cache: "no-store" })
             .then(res => res.ok ? res.json() : null).catch(() => null),
         ]);
+        nextRefreshAt = readNextRefreshAt(prRes.headers.get("X-PRs-Next-Refresh-At"));
         if (!prRes.ok) throw new Error("Failed to fetch PRs");
         const prs = await prRes.json();
         if (!Array.isArray(prs)) throw new Error("Invalid PR response");
@@ -768,11 +794,7 @@
       } finally {
         refreshing = false;
       }
-      if (hasSnapshot) {
-        render();
-      } else {
-        app.innerHTML = '<div class="error">Failed to load PRs. Is gh authenticated?</div>';
-      }
+      showSnapshot();
     }
 
     async function sleepPRs(keys, days) {
@@ -1128,7 +1150,7 @@
       render();
     });
 
-    refreshBtn.addEventListener("click", () => fetchPRs({ force: true }));
+    refreshBtn.addEventListener("click", () => refreshPRs());
 
     sleepSelectedBtn.addEventListener("click", () => {
       if (selected.size === 0) return;
@@ -1229,21 +1251,16 @@
         });
         if (!res.ok) throw new Error("Save failed");
         reposOverlay.classList.remove("open");
-        fetchPRs({ force: true });
+        refreshPRs();
       } catch {
         repoStatus.textContent = "Save failed";
       }
     });
 
-    fetchPRs();
+    loadSnapshot();
 
-    // Poll regularly and pick up other devices' snapshots when returning.
-    setInterval(fetchPRs, AUTO_REFRESH_MS);
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") fetchPRs();
-    });
-
-    // Keep the "Updated Xm ago" label current between refreshes.
+    // Keep the "Updated Xm ago" label current and re-enable Refresh once the
+    // hourly window has passed.
     setInterval(updateLastRefresh, 30 * 1000);
 </script>
 </body>

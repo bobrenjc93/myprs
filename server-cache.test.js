@@ -6,6 +6,8 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { once } = require("node:events");
 
+const POST = { method: "POST" };
+
 async function startApp(t, saved) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "myprs-api-cache-test-"));
   if (saved) fs.writeFileSync(path.join(dir, "pr-cache.json"), JSON.stringify(saved));
@@ -64,12 +66,12 @@ test("devices share the saved snapshot immediately and a single fresh response a
     };
   });
 
-  const desktop = fetch(`${url}/api/prs`);
-  const phone = fetch(`${url}/api/prs`);
+  const desktop = fetch(`${url}/api/prs`, POST);
+  const phone = fetch(`${url}/api/prs`, POST);
   await bothRefreshing;
   assert.equal(listings.length, 1);
   const duringRefresh = await (await fetch(`${url}/api/prs/cache`)).json();
-  assert.deepEqual(duringRefresh, { ...saved, sleep: {}, authError: false });
+  assert.deepEqual(duringRefresh, { ...saved, nextRefreshAt: 0, sleep: {}, authError: false });
 
   listings[0](null, JSON.stringify([{
     number: 7, title: "New GitHub result", isDraft: true, reviews: [], reviewRequests: [],
@@ -83,7 +85,7 @@ test("devices share the saved snapshot immediately and a single fresh response a
   assert.ok(at > saved.at);
   assert.equal(Number(phoneResponse.headers.get("X-PRs-Updated-At")), at);
   assert.deepEqual(await (await fetch(`${url}/api/prs/cache`)).json(), {
-    prs: desktopRows, at, sleep: {}, authError: false,
+    prs: desktopRows, at, nextRefreshAt: at + 60 * 60 * 1000, sleep: {}, authError: false,
   });
 
   // Sleep state is shared immediately, without a second GitHub refresh.
@@ -100,8 +102,8 @@ test("a recent snapshot is reused, and changing repositories forces a fresh quer
   const { url, listings } = await startApp(t, saved);
 
   // Extra tabs, devices and tab-focus events must not each cost a GitHub call.
-  assert.deepEqual(await (await fetch(`${url}/api/prs`)).json(), saved.prs);
-  assert.deepEqual(await (await fetch(`${url}/api/prs`)).json(), saved.prs);
+  assert.deepEqual(await (await fetch(`${url}/api/prs`, POST)).json(), saved.prs);
+  assert.deepEqual(await (await fetch(`${url}/api/prs`, POST)).json(), saved.prs);
   assert.equal(listings.length, 0);
 
   const repos = await (await fetch(`${url}/api/repos`, {
@@ -114,7 +116,7 @@ test("a recent snapshot is reused, and changing repositories forces a fresh quer
   });
 
   // The snapshot is now wrong rather than merely stale, so it must not be served.
-  const refreshed = fetch(`${url}/api/prs`);
+  const refreshed = fetch(`${url}/api/prs`, POST);
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(listings.length, 2, "both enabled repositories are queried");
   for (const send of listings) send(null, JSON.stringify([]));
@@ -143,28 +145,47 @@ test("a snapshot from other repositories is shown but never counts as fresh", { 
   // Still shown, because it beats a blank dashboard while GitHub is queried.
   assert.deepEqual((await (await fetch(`${url}/api/prs/cache`)).json()).prs, saved.prs);
 
-  const refreshed = fetch(`${url}/api/prs`);
+  const refreshed = fetch(`${url}/api/prs`, POST);
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(listings.length, 1, "the stale snapshot must not satisfy the refresh");
   listings[0](null, JSON.stringify([]));
   assert.deepEqual(await (await refreshed).json(), []);
 });
 
-test("an explicit refresh reaches GitHub inside the throttle window", { timeout: 5000 }, async (t) => {
+test("the Refresh button cannot reach GitHub inside the hourly window", { timeout: 5000 }, async (t) => {
   const { url, listings } = await startApp(t);
-  const first = fetch(`${url}/api/prs`);
+  const first = fetch(`${url}/api/prs`, POST);
   await new Promise(resolve => setTimeout(resolve, 50));
   listings[0](null, JSON.stringify([]));
   await first;
 
   // Polling and tab focus reuse the snapshot the refresh just stored...
-  await fetch(`${url}/api/prs`);
+  await fetch(`${url}/api/prs`, POST);
   assert.equal(listings.length, 1);
 
-  // ...but the Refresh button must not silently do nothing.
-  const forced = fetch(`${url}/api/prs?force=1`);
+  // ...and so does the Refresh button, which used to bypass the throttle.
+  const forced = await fetch(`${url}/api/prs?force=1`, POST);
+  assert.equal(forced.status, 200);
+  assert.equal(listings.length, 1);
+});
+
+test("loading or reloading the page cannot refresh from GitHub", async (t) => {
+  const { url, listings } = await startApp(t);
+  assert.equal((await fetch(`${url}/api/prs`)).status, 404);
+  assert.equal((await fetch(`${url}/api/prs/cache`)).status, 200);
+  assert.equal(listings.length, 0);
+});
+
+test("clients learn when the next refresh can reach GitHub", { timeout: 5000 }, async (t) => {
+  const { url, listings } = await startApp(t);
+  const before = Date.now();
+  const refreshed = fetch(`${url}/api/prs`, POST);
   await new Promise(resolve => setTimeout(resolve, 50));
-  assert.equal(listings.length, 2);
-  listings[1](null, JSON.stringify([]));
-  assert.equal((await forced).status, 200);
+  listings[0](null, JSON.stringify([]));
+  const response = await refreshed;
+  const updatedAt = Number(response.headers.get("X-PRs-Updated-At"));
+  const nextAt = Number(response.headers.get("X-PRs-Next-Refresh-At"));
+  assert.ok(updatedAt >= before);
+  assert.equal(nextAt, updatedAt + 60 * 60 * 1000);
+  assert.equal((await (await fetch(`${url}/api/prs/cache`)).json()).nextRefreshAt, nextAt);
 });
