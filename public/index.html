@@ -718,26 +718,35 @@
       render();
     }
 
-    // Show the server's shared snapshot without contacting GitHub. Loading the
-    // page never refreshes; only the Refresh button does.
+    // Show the server's shared snapshot without contacting GitHub. The server
+    // refreshes hourly on its own; open tabs re-read its snapshot, which is
+    // free, and only re-render when something changed.
     async function loadSnapshot() {
+      if (refreshing) return;
+      let changed = !hasSnapshot;
       try {
         const res = await fetch("/api/prs/cache", { cache: "no-store" });
         const cache = res.ok ? await res.json() : null;
         if (cache && Array.isArray(cache.prs)) {
-          allPRs = cache.prs;
-          hasSnapshot = true;
-          sleepData = cache.sleep || {};
-          lastRefreshed = cache.at || null;
           nextRefreshAt = readNextRefreshAt(cache.nextRefreshAt);
+          const sleep = cache.sleep || {};
+          if (JSON.stringify(sleep) !== JSON.stringify(sleepData) || !!cache.authError !== pingAuthError) changed = true;
+          sleepData = sleep;
           pingAuthError = !!cache.authError;
-          selected.clear();
-          updateActionBar();
+          if (!hasSnapshot || cache.at !== lastRefreshed) {
+            allPRs = cache.prs;
+            hasSnapshot = true;
+            lastRefreshed = cache.at || null;
+            selected.clear();
+            updateActionBar();
+            changed = true;
+          }
         }
       } catch {
-        refreshError = true;
+        if (!hasSnapshot) refreshError = true;
       }
-      showSnapshot();
+      if (changed) showSnapshot();
+      else updateLastRefresh();
     }
 
     function showSnapshot() {
@@ -1258,6 +1267,13 @@
     });
 
     loadSnapshot();
+
+    // Pick up the server's hourly refresh (or another device's) without
+    // reloading. This reads the server's snapshot and never reaches GitHub.
+    setInterval(loadSnapshot, 60 * 1000);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") loadSnapshot();
+    });
 
     // Keep the "Updated Xm ago" label current and re-enable Refresh once the
     // hourly window has passed.

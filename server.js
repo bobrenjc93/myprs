@@ -16,10 +16,12 @@ const REPOS_FILE = path.join(__dirname, "repos.json");
 // tracks an explicit opt-in list rather than everything the account authors.
 const DEFAULT_REPOS = ["pytorch/pytorch"];
 
-// GitHub is only contacted when someone clicks Refresh, and at most once an
-// hour across every device. The GraphQL budget is shared with every other tool
-// on the account. Only changing which repos are tracked skips the wait.
+// The server refreshes from GitHub on its own once an hour, and the Refresh
+// button can't go faster than that from any device. The GraphQL budget is
+// shared with every other tool on the account. Only changing which repos are
+// tracked skips the wait.
 const MIN_REFRESH_MS = 60 * 60 * 1000;
+const SCHEDULE_CHECK_MS = 60 * 1000;
 
 // A failed refresh shouldn't cost the whole hour, but retries still back off.
 const RETRY_BASE_MS = 60 * 1000;
@@ -400,6 +402,14 @@ const prCache = createPrCache({
   fingerprint: () => readRepos().enabled.join(","),
 });
 
+// Checked every minute, so the hourly refresh happens as soon as it's allowed
+// and a failed one is retried on the cache's backoff schedule. A refresh
+// that's already running is joined rather than duplicated.
+function refreshWhenDue() {
+  if (Date.now() < prCache.nextRefreshAt()) return Promise.resolve();
+  return prCache.refresh().then(() => {}, e => console.error("scheduled refresh failed:", e.message));
+}
+
 // Reading the shared snapshot is immediate and never waits for GitHub. Sleep
 // and auth state are read now so another device's changes aren't cached away.
 app.get("/api/prs/cache", (req, res) => {
@@ -501,9 +511,11 @@ if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`Server running at http://localhost:${PORT}`);
   });
+  refreshWhenDue();
+  setInterval(refreshWhenDue, SCHEDULE_CHECK_MS);
 }
 
 module.exports = {
-  app, ghstackNumbers, groupGhstackPrs, readRepos,
+  app, refreshWhenDue, ghstackNumbers, groupGhstackPrs, readRepos,
   effectiveReviewDecision, drciStatus, claudeReviewStatus, pytorchStatuses, resolvePytorchStatuses,
 };

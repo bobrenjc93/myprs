@@ -38,7 +38,7 @@ async function startApp(t, saved) {
     fs.rmSync(dir, { recursive: true, force: true });
   });
   await once(server, "listening");
-  return { app, listings, url: `http://127.0.0.1:${server.address().port}` };
+  return { app, listings, sandbox, url: `http://127.0.0.1:${server.address().port}` };
 }
 
 test("a new device can read an empty server cache without starting a GitHub refresh", async (t) => {
@@ -188,4 +188,29 @@ test("clients learn when the next refresh can reach GitHub", { timeout: 5000 }, 
   assert.ok(updatedAt >= before);
   assert.equal(nextAt, updatedAt + 60 * 60 * 1000);
   assert.equal((await (await fetch(`${url}/api/prs/cache`)).json()).nextRefreshAt, nextAt);
+});
+
+test("the hourly schedule refreshes only once the hour has passed", { timeout: 5000 }, async (t) => {
+  const { url, listings, sandbox } = await startApp(t, {
+    prs: [], at: Date.now(), fingerprint: "pytorch/pytorch",
+  });
+  const { refreshWhenDue } = sandbox.module.exports;
+
+  // A snapshot from this hour is left alone.
+  await refreshWhenDue();
+  assert.equal(listings.length, 0);
+
+  // Changing repos makes it due immediately, and checks while it runs join it.
+  await fetch(`${url}/api/repos`, {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: ["pytorch/pytorch"] }),
+  });
+  const scheduled = refreshWhenDue();
+  refreshWhenDue();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(listings.length, 1);
+  listings[0](null, JSON.stringify([]));
+  await scheduled;
+  await refreshWhenDue();
+  assert.equal(listings.length, 1);
 });
