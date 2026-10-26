@@ -2,16 +2,15 @@ const fs = require("fs");
 
 // One shared snapshot and one refresh at a time, regardless of which device
 // asked for it. A failed refresh leaves the last successful result available.
-// `minIntervalMs` caps how often GitHub is contacted: every refresh requested
-// inside that window — from any tab, device, focus event or Refresh click —
-// reuses the snapshot instead of multiplying the API calls.
+// `minIntervalMs` caps how often automatic refreshes contact GitHub: inside
+// that window they reuse the snapshot instead of multiplying the API calls.
+// A refresh someone asked for (`manual`) always reaches GitHub.
 // `fingerprint` describes the settings a snapshot was produced under. A
 // snapshot recorded under different settings is wrong rather than merely
 // stale, so it is still shown — beating a blank dashboard — but never counts
 // as fresh, which also discards snapshots written by an older version.
 // A failed refresh backs off exponentially from `retryBaseMs` up to
-// `maxRetryMs`. Retrying while GitHub is rate limiting the account only
-// spends the requests that would otherwise let it recover.
+// `maxRetryMs`, so an automatic schedule can't keep hammering GitHub.
 function createPrCache({
   file, fetchPrs, now = Date.now, onError = console.error,
   minIntervalMs = 0, fingerprint = () => "",
@@ -23,6 +22,7 @@ function createPrCache({
   let retryDelay = 0;
   let retryAt = 0;
   let lastError = null;
+  let lastFailureAt = 0;
   try {
     const saved = JSON.parse(fs.readFileSync(file, "utf8"));
     if (Array.isArray(saved?.prs) && Number.isFinite(saved.at) && saved.at > 0) {
@@ -34,10 +34,10 @@ function createPrCache({
     // The first visit still works when no cache exists or a file is corrupt.
   }
 
-  function refresh() {
-    if (snapshot && now() < freshUntil) return Promise.resolve(snapshot);
+  function refresh({ manual = false } = {}) {
+    if (!manual && snapshot && now() < freshUntil) return Promise.resolve(snapshot);
     if (!inFlight) {
-      if (now() < retryAt) {
+      if (!manual && now() < retryAt) {
         return Promise.reject(new Error(
           `Not retrying GitHub until ${new Date(retryAt).toLocaleTimeString()} after: ${lastError.message}`,
         ));
@@ -48,6 +48,7 @@ function createPrCache({
         freshUntil = snapshot.at + minIntervalMs;
         retryDelay = 0;
         retryAt = 0;
+        lastError = null;
         try {
           // Rename only after a complete write so a restart cannot read half
           // of a snapshot. Keep serving fresh data if persistence fails.
@@ -61,6 +62,7 @@ function createPrCache({
         retryDelay = Math.min(maxRetryMs, retryDelay ? retryDelay * 2 : retryBaseMs);
         retryAt = now() + retryDelay;
         lastError = error;
+        lastFailureAt = now();
         throw error;
       }).finally(() => {
         inFlight = null;
@@ -77,13 +79,18 @@ function createPrCache({
     retryAt = 0;
   }
 
-  // The earliest time a refresh will contact GitHub rather than reuse the
-  // snapshot or report the last failure.
+  // The earliest time an automatic refresh will contact GitHub, which also
+  // waits out the failure backoff.
   function nextRefreshAt() {
     return Math.max(snapshot ? freshUntil : 0, retryAt);
   }
 
-  return { getSnapshot: () => snapshot, refresh, invalidate, nextRefreshAt };
+  // Why the snapshot is older than it should be, until a refresh succeeds.
+  function lastFailure() {
+    return lastError ? { at: lastFailureAt, message: lastError.message } : null;
+  }
+
+  return { getSnapshot: () => snapshot, refresh, invalidate, nextRefreshAt, lastFailure };
 }
 
 module.exports = { createPrCache };

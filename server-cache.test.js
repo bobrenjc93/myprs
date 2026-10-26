@@ -14,6 +14,7 @@ async function startApp(t, saved) {
   // A refresh is exactly one `gh pr list` per enabled repo; the account-wide
   // search is only reachable from the settings panel.
   const listings = [];
+  const gh = [];
   const sandbox = {
     module: { exports: {} }, __dirname: dir,
     console: { ...console, error() {} },
@@ -23,6 +24,7 @@ async function startApp(t, saved) {
       return { execFile(command, args, options, callback) {
         assert.equal(command, "gh", "Tests must not send notifications");
         assert.notEqual(args[0], "search", "A refresh must not spend the search rate limit");
+        gh.push(options);
         if (args[1] === "list") listings.push(callback);
         else if (args[1] === "view") callback(null, JSON.stringify({ comments: [] }));
         else assert.fail(`Unexpected gh arguments: ${args.join(" ")}`);
@@ -38,7 +40,7 @@ async function startApp(t, saved) {
     fs.rmSync(dir, { recursive: true, force: true });
   });
   await once(server, "listening");
-  return { app, listings, sandbox, url: `http://127.0.0.1:${server.address().port}` };
+  return { app, listings, gh, dir, sandbox, url: `http://127.0.0.1:${server.address().port}` };
 }
 
 test("a new device can read an empty server cache without starting a GitHub refresh", async (t) => {
@@ -71,7 +73,7 @@ test("devices share the saved snapshot immediately and a single fresh response a
   await bothRefreshing;
   assert.equal(listings.length, 1);
   const duringRefresh = await (await fetch(`${url}/api/prs/cache`)).json();
-  assert.deepEqual(duringRefresh, { ...saved, nextRefreshAt: 0, sleep: {}, authError: false });
+  assert.deepEqual(duringRefresh, { ...saved, nextRefreshAt: 0, refreshFailure: null, sleep: {}, authError: false });
 
   listings[0](null, JSON.stringify([{
     number: 7, title: "New GitHub result", isDraft: true, reviews: [], reviewRequests: [],
@@ -85,7 +87,7 @@ test("devices share the saved snapshot immediately and a single fresh response a
   assert.ok(at > saved.at);
   assert.equal(Number(phoneResponse.headers.get("X-PRs-Updated-At")), at);
   assert.deepEqual(await (await fetch(`${url}/api/prs/cache`)).json(), {
-    prs: desktopRows, at, nextRefreshAt: at + 60 * 60 * 1000, sleep: {}, authError: false,
+    prs: desktopRows, at, nextRefreshAt: at + 60 * 60 * 1000, refreshFailure: null, sleep: {}, authError: false,
   });
 
   // Sleep state is shared immediately, without a second GitHub refresh.
@@ -99,11 +101,11 @@ test("devices share the saved snapshot immediately and a single fresh response a
 
 test("a recent snapshot is reused, and changing repositories forces a fresh query", { timeout: 5000 }, async (t) => {
   const saved = { prs: [{ number: 6, title: "Fetched moments ago" }], at: Date.now(), fingerprint: "pytorch/pytorch" };
-  const { url, listings } = await startApp(t, saved);
+  const { url, listings, sandbox } = await startApp(t, saved);
 
-  // Extra tabs, devices and tab-focus events must not each cost a GitHub call.
-  assert.deepEqual(await (await fetch(`${url}/api/prs`, POST)).json(), saved.prs);
-  assert.deepEqual(await (await fetch(`${url}/api/prs`, POST)).json(), saved.prs);
+  // A restart doesn't re-query GitHub for a snapshot from this hour.
+  await sandbox.module.exports.refreshWhenDue();
+  assert.deepEqual((await (await fetch(`${url}/api/prs/cache`)).json()).prs, saved.prs);
   assert.equal(listings.length, 0);
 
   const repos = await (await fetch(`${url}/api/repos`, {
@@ -152,21 +154,23 @@ test("a snapshot from other repositories is shown but never counts as fresh", { 
   assert.deepEqual(await (await refreshed).json(), []);
 });
 
-test("the Refresh button cannot reach GitHub inside the hourly window", { timeout: 5000 }, async (t) => {
-  const { url, listings } = await startApp(t);
+test("the Refresh button reaches GitHub even inside the hourly window", { timeout: 5000 }, async (t) => {
+  const { url, listings, sandbox } = await startApp(t);
   const first = fetch(`${url}/api/prs`, POST);
   await new Promise(resolve => setTimeout(resolve, 50));
   listings[0](null, JSON.stringify([]));
   await first;
 
-  // Polling and tab focus reuse the snapshot the refresh just stored...
-  await fetch(`${url}/api/prs`, POST);
+  // The hourly schedule leaves the snapshot alone...
+  await sandbox.module.exports.refreshWhenDue();
   assert.equal(listings.length, 1);
 
-  // ...and so does the Refresh button, which used to bypass the throttle.
-  const forced = await fetch(`${url}/api/prs?force=1`, POST);
-  assert.equal(forced.status, 200);
-  assert.equal(listings.length, 1);
+  // ...but a click always fetches.
+  const clicked = fetch(`${url}/api/prs`, POST);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(listings.length, 2);
+  listings[1](null, JSON.stringify([]));
+  assert.equal((await clicked).status, 200);
 });
 
 test("loading or reloading the page cannot refresh from GitHub", async (t) => {
@@ -213,4 +217,33 @@ test("the hourly schedule refreshes only once the hour has passed", { timeout: 5
   await scheduled;
   await refreshWhenDue();
   assert.equal(listings.length, 1);
+});
+
+test("gh uses a private cache that a rate-limit error clears, and the failure is shown", { timeout: 5000 }, async (t) => {
+  const { url, listings, gh, dir } = await startApp(t, {
+    prs: [], at: 1, fingerprint: "pytorch/pytorch",
+  });
+  const cacheDir = path.join(dir, ".gh-cache");
+  fs.mkdirSync(path.join(cacheDir, "gh"), { recursive: true });
+  fs.writeFileSync(path.join(cacheDir, "gh", "poisoned"), "API rate limit already exceeded");
+
+  const refreshed = fetch(`${url}/api/prs`, POST);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(gh[0].env.XDG_CACHE_HOME, cacheDir);
+  const error = new Error("Command failed: gh pr list\nGraphQL: API rate limit already exceeded for user ID 1.\n");
+  listings[0](error, "");
+  assert.equal((await refreshed).status, 500);
+  assert.equal(fs.existsSync(cacheDir), false);
+
+  const { refreshFailure } = await (await fetch(`${url}/api/prs/cache`)).json();
+  assert.match(refreshFailure.message, /rate limit already exceeded/);
+  assert.ok(refreshFailure.at > 1);
+
+  // The Refresh button can retry immediately; only the schedule backs off.
+  const retried = fetch(`${url}/api/prs`, POST);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(listings.length, 2);
+  listings[1](null, JSON.stringify([]));
+  assert.equal((await retried).status, 200);
+  assert.equal((await (await fetch(`${url}/api/prs/cache`)).json()).refreshFailure, null);
 });

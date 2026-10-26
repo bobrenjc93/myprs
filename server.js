@@ -12,14 +12,20 @@ const NOTIFIED_FILE = path.join(__dirname, "notified.json");
 const PR_CACHE_FILE = path.join(__dirname, "pr-cache.json");
 const REPOS_FILE = path.join(__dirname, "repos.json");
 
+// gh caches the search feature-detection query behind `gh pr list --author`
+// on disk for hours, and it will cache a "rate limit exceeded" reply too.
+// Every later call then fails instantly without contacting GitHub, long
+// after the limit has reset. myprs keeps its own gh cache and clears it
+// whenever gh reports a rate limit, so a poisoned entry lasts one attempt.
+const GH_CACHE_DIR = path.join(__dirname, ".gh-cache");
+
 // Every enabled repository costs API calls on each refresh, so the dashboard
 // tracks an explicit opt-in list rather than everything the account authors.
 const DEFAULT_REPOS = ["pytorch/pytorch"];
 
-// The server refreshes from GitHub on its own once an hour, and the Refresh
-// button can't go faster than that from any device. The GraphQL budget is
-// shared with every other tool on the account. Only changing which repos are
-// tracked skips the wait.
+// The server refreshes from GitHub on its own once an hour; the GraphQL budget
+// is shared with every other tool on the account. The Refresh button and
+// changing which repos are tracked fetch immediately.
 const MIN_REFRESH_MS = 60 * 60 * 1000;
 const SCHEDULE_CHECK_MS = 60 * 1000;
 
@@ -87,8 +93,12 @@ function writeRepos(repos) {
 
 function execGh(args) {
   return new Promise((resolve, reject) => {
-    execFile("gh", args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
-      if (err) return reject(err);
+    const env = { ...process.env, XDG_CACHE_HOME: GH_CACHE_DIR };
+    execFile("gh", args, { maxBuffer: 10 * 1024 * 1024, env }, (err, stdout) => {
+      if (err) {
+        if (/rate limit/i.test(err.message)) fs.rmSync(GH_CACHE_DIR, { recursive: true, force: true });
+        return reject(err);
+      }
       try { resolve(JSON.parse(stdout)); }
       catch (e) { reject(e); }
     });
@@ -415,7 +425,8 @@ function refreshWhenDue() {
 app.get("/api/prs/cache", (req, res) => {
   const snapshot = prCache.getSnapshot();
   res.json(snapshot ? {
-    ...snapshot, nextRefreshAt: prCache.nextRefreshAt(), sleep: getActiveSleep(), authError: pingAuthError,
+    ...snapshot, nextRefreshAt: prCache.nextRefreshAt(), refreshFailure: prCache.lastFailure(),
+    sleep: getActiveSleep(), authError: pingAuthError,
   } : null);
 });
 
@@ -423,7 +434,7 @@ app.get("/api/prs/cache", (req, res) => {
 // GitHub; only the Refresh button (or saving repo settings) does.
 app.post("/api/prs", async (req, res) => {
   try {
-    const snapshot = await prCache.refresh();
+    const snapshot = await prCache.refresh({ manual: true });
     res.set("X-PRs-Updated-At", String(snapshot.at));
     res.set("X-PRs-Next-Refresh-At", String(prCache.nextRefreshAt()));
     res.json(snapshot.prs);

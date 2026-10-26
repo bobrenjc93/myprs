@@ -247,7 +247,7 @@ test("invalid fetched data also backs off", async (t) => {
   assert.equal(fetches, 1);
 });
 
-test("nextRefreshAt reports when GitHub will next be contacted", async (t) => {
+test("next refresh times and the last failure track success, failure and settings changes", async (t) => {
   const { file } = fixture(t);
   let time = 1000;
   let failing = false;
@@ -259,10 +259,43 @@ test("nextRefreshAt reports when GitHub will next be contacted", async (t) => {
   assert.equal(cache.nextRefreshAt(), 0);
   await cache.refresh();
   assert.equal(cache.nextRefreshAt(), 1500);
+  assert.equal(cache.lastFailure(), null);
   time = 1500;
   failing = true;
   await assert.rejects(cache.refresh(), /down/);
+  // The automatic schedule waits out the backoff.
   assert.equal(cache.nextRefreshAt(), 1600);
+  assert.deepEqual(cache.lastFailure(), { at: 1500, message: "down" });
   cache.invalidate();
   assert.equal(cache.nextRefreshAt(), 0);
+  failing = false;
+  await cache.refresh();
+  assert.equal(cache.lastFailure(), null);
+});
+
+test("a manual refresh retries during the failure backoff", async (t) => {
+  const { file } = fixture(t);
+  let fetches = 0;
+  const cache = createPrCache({
+    file, now: () => 0, retryBaseMs: 100,
+    fetchPrs: async () => { if (++fetches === 1) throw new Error("down"); return []; },
+  });
+
+  await assert.rejects(cache.refresh(), /down/);
+  await assert.rejects(cache.refresh(), /Not retrying/);
+  assert.deepEqual(await cache.refresh({ manual: true }), { prs: [], at: 0 });
+  assert.equal(fetches, 2);
+});
+
+test("a manual refresh reaches GitHub even while the snapshot is fresh", async (t) => {
+  const { file } = fixture(t);
+  let fetches = 0;
+  const cache = createPrCache({
+    file, now: () => 0, minIntervalMs: 1000, fetchPrs: async () => [{ number: ++fetches }],
+  });
+
+  await cache.refresh();
+  assert.deepEqual(await cache.refresh(), { prs: [{ number: 1 }], at: 0 });
+  assert.deepEqual(await cache.refresh({ manual: true }), { prs: [{ number: 2 }], at: 0 });
+  assert.equal(fetches, 2);
 });

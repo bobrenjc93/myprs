@@ -585,6 +585,7 @@
     let sleepData = {};
     let refreshing = false;
     let refreshError = false;
+    let refreshFailure = null;   // the server's last failed refresh, if any
     let lastRefreshed = null;
     let nextRefreshAt = 0;
     let pingAuthError = false;
@@ -693,11 +694,10 @@
 
     function updateLastRefresh() {
       lastRefreshEl.textContent = lastRefreshed ? `Updated ${timeAgo(lastRefreshed)}` : "";
-      const waiting = Date.now() < nextRefreshAt;
-      refreshBtn.disabled = refreshing || waiting;
-      refreshBtn.title = waiting
-        ? `GitHub is refreshed at most once an hour. Next refresh at ${new Date(nextRefreshAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`
-        : "Fetch the latest PRs from GitHub";
+      refreshBtn.disabled = refreshing;
+      refreshBtn.title = Date.now() < nextRefreshAt
+        ? `Fetch the latest PRs from GitHub now. Next automatic refresh at ${new Date(nextRefreshAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`
+        : "Fetch the latest PRs from GitHub now";
     }
 
     function readNextRefreshAt(value) {
@@ -730,8 +730,11 @@
         if (cache && Array.isArray(cache.prs)) {
           nextRefreshAt = readNextRefreshAt(cache.nextRefreshAt);
           const sleep = cache.sleep || {};
-          if (JSON.stringify(sleep) !== JSON.stringify(sleepData) || !!cache.authError !== pingAuthError) changed = true;
+          const failure = cache.refreshFailure || null;
+          if (JSON.stringify(sleep) !== JSON.stringify(sleepData) || !!cache.authError !== pingAuthError ||
+              JSON.stringify(failure) !== JSON.stringify(refreshFailure)) changed = true;
           sleepData = sleep;
+          refreshFailure = failure;
           pingAuthError = !!cache.authError;
           if (!hasSnapshot || cache.at !== lastRefreshed) {
             allPRs = cache.prs;
@@ -760,8 +763,8 @@
       }
     }
 
-    // The server contacts GitHub at most once an hour; inside that window it
-    // returns the shared snapshot, and the button stays disabled.
+    // Always reaches GitHub. Other tabs and devices pick up the result from
+    // the server's snapshot.
     async function refreshPRs() {
       // Avoid overlapping requests, which can let an older response overwrite
       // a newer one.
@@ -795,6 +798,7 @@
         const updatedAt = Number(prRes.headers.get("X-PRs-Updated-At"));
         lastRefreshed = Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : null;
         refreshError = false;
+        refreshFailure = null;
         selected.clear();
         updateActionBar();
       } catch (e) {
@@ -804,6 +808,8 @@
         refreshing = false;
       }
       showSnapshot();
+      // The server records why it failed; show that instead of a bare error.
+      if (refreshError) loadSnapshot();
     }
 
     async function sleepPRs(keys, days) {
@@ -1109,7 +1115,12 @@
         html += '<div class="refresh-banner"><span class="spinner-sm"></span>Refreshing&hellip;</div>';
       }
 
-      if (refreshError) {
+      if (refreshFailure) {
+        // gh's message starts with the command line; the reason is its last line.
+        const reason = refreshFailure.message.trim().split(/\r?\n/).pop();
+        const when = new Date(refreshFailure.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        html += `<div class="refresh-error-banner">Refresh failed at ${when}: ${escapeHtml(reason)} Showing data from the last successful update.</div>`;
+      } else if (refreshError) {
         html += '<div class="refresh-error-banner">Refresh failed. Showing data from the last successful update.</div>';
       }
 
@@ -1275,8 +1286,7 @@
       if (document.visibilityState === "visible") loadSnapshot();
     });
 
-    // Keep the "Updated Xm ago" label current and re-enable Refresh once the
-    // hourly window has passed.
+    // Keep the "Updated Xm ago" label and the Refresh tooltip current.
     setInterval(updateLastRefresh, 30 * 1000);
 </script>
 </body>

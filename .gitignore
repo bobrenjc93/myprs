@@ -4,3 +4,4 @@ notified.json
 pr-cache.json
 pr-cache.json.tmp
 repos.json
+.gh-cache/
